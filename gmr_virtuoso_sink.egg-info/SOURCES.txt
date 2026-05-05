@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+gmr_virtuoso_sink.egg-info/PKG-INFO
+gmr_virtuoso_sink.egg-info/SOURCES.txt
+gmr_virtuoso_sink.egg-info/dependency_links.txt
+gmr_virtuoso_sink.egg-info/entry_points.txt
+gmr_virtuoso_sink.egg-info/requires.txt
+gmr_virtuoso_sink.egg-info/top_level.txt
+tests/test_triples.py
+virtuoso_sink/__init__.py
+virtuoso_sink/__main__.py
+virtuoso_sink/sink.py
+virtuoso_sink/triples.py
