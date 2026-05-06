@@ -39,15 +39,21 @@ class VirtuosoSink(EventConsumer):
         self.dba_user = os.environ.get("VIRTUOSO_DBA_USER", "dba")
         self.dba_password = os.environ["VIRTUOSO_DBA_PASSWORD"]
         self.timeout = float(os.environ.get("VIRTUOSO_HTTP_TIMEOUT", "1800"))
+        # Bracket state is sink-instance scope, NOT per-handle().
+        # A single Begin/EndGraphReplace bracket can span many
+        # handle() calls because batch_size caps each fetch.
+        self._open_brackets: dict[str, list[Triple]] = defaultdict(list)
 
     # ── EventConsumer hook ────────────────────────────────
 
     def handle(self, batch: list[EventEnvelope]) -> None:
         """Walk events left-to-right, group by Begin/End bracket
         per graph_iri, emit either a bulk PUT (closed bracket)
-        or a per-event SPARQL UPDATE (no bracket open)."""
-        # Open brackets: graph_iri → list[Triple]
-        open_brackets: dict[str, list[Triple]] = defaultdict(list)
+        or a per-event SPARQL UPDATE (no bracket open).
+
+        Brackets persist across handle() calls — see __init__.
+        """
+        open_brackets = self._open_brackets
 
         for ev in batch:
             if ev.event_type == "BeginGraphReplace":
