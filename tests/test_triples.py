@@ -130,7 +130,7 @@ def test_relationship_predicate_resolves_to_fontem() -> None:
 
 def test_disclosure_links_to_filer_company() -> None:
     triples = render_upsert_disclosure({
-        "system": "eu-lobbying",
+        "system": "cdp",
         "disclosure_id": "EU-TR-12345",
         "company_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
         "year": 2024, "title": "Annual declaration",
@@ -142,6 +142,23 @@ def test_disclosure_links_to_filer_company() -> None:
     # Flat detail-key projection.
     assert any(t.p.endswith("detail_total_eur_min") for t in triples)
     assert any(t.p.endswith("detail_fte_lobbyists") for t in triples)
+
+
+def test_disclosure_omits_filed_by_when_no_company() -> None:
+    """EU lobbying register entries are filed by the Lobbyist itself —
+    no parent Company. The renderer must skip the filedBy triple
+    rather than hardcoding a missing company IRI."""
+    triples = render_upsert_disclosure({
+        "system": "eu-lobbying",
+        "disclosure_id": "EU-TR-12345",
+        "year": 2024,
+        "details": {"members_fte": 4},
+    })
+    preds = {t.p for t in triples}
+    assert "http://data.fontem.eu/ontology#filedBy" not in preds
+    # The Disclosure node still gets typed + carries its system
+    assert any(t.o.endswith("Disclosure>") for t in triples)
+    assert any(t.p.endswith("disclosureSystem") for t in triples)
 
 
 def test_exchange_rate_iri_keyed_by_triple() -> None:
