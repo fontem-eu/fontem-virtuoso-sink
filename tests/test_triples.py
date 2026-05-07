@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from virtuoso_sink.triples import (
-    RENDERERS, render_upsert_company,
-    render_upsert_filing, render_upsert_sanctioned_entity,
-    to_turtle,
+    RENDERERS, render_upsert_authority,
+    render_upsert_company, render_upsert_contract,
+    render_upsert_filing, render_upsert_listing,
+    render_upsert_sanctioned_entity, to_turtle,
 )
 
 
@@ -53,12 +54,56 @@ def test_to_turtle_emits_one_line_per_triple() -> None:
     assert out.count(" .\n") == len(triples)
 
 
+def test_listing_links_to_company() -> None:
+    triples = render_upsert_listing({
+        "ticker": "AAPL",
+        "company_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
+        "exchange": "US", "currency": "USD", "active": True,
+    })
+    pmap = {t.p: t.o for t in triples}
+    assert "http://data.fontem.eu/ontology#listingOf" in pmap
+    assert "Company" in pmap["http://data.fontem.eu/ontology#listingOf"]
+    assert pmap["http://data.fontem.eu/ontology#exchange"] == '"US"'
+    # Listing IRI is keyed by ticker.
+    assert triples[0].s.endswith("/Listing/AAPL")
+
+
+def test_authority_renders_minimal() -> None:
+    triples = render_upsert_authority({
+        "authority_id": "11111111-2222-5333-8444-555555555555",
+        "name": "Test Authority", "country": "FR",
+        "authority_type": "regulator",
+    })
+    pmap = {t.p: t.o for t in triples}
+    assert any("Authority" in t.o for t in triples)
+    assert "http://www.wikidata.org/prop/direct/P17" in pmap
+    assert "http://data.fontem.eu/ontology#authorityType" in pmap
+
+
+def test_contract_links_authority_and_company() -> None:
+    triples = render_upsert_contract({
+        "ted_notice_id": "2025-OJS123-456789",
+        "title": "Some contract",
+        "authority_id": "auth-1",
+        "company_gmr_id": "11111111-2222-5333-8444-555555555555",
+        "value_eur": 1000000.0,
+    })
+    pmap = {t.p: t.o for t in triples}
+    awarded_by = pmap["http://data.fontem.eu/ontology#awardedBy"]
+    awarded_to = pmap["http://data.fontem.eu/ontology#awardedTo"]
+    assert "Authority/auth-1" in awarded_by
+    assert "Company/" in awarded_to
+    assert "http://data.fontem.eu/ontology#valueEur" in pmap
+
+
 def test_renderer_registry_covers_all_event_types() -> None:
     # Sentinel: if we add a new event type without a renderer
     # entry, this test fails.
     expected = {
         "BeginGraphReplace", "EndGraphReplace",
-        "UpsertCompany", "UpsertSanctionedEntity", "UpsertFiling",
+        "UpsertCompany", "UpsertListing",
+        "UpsertSanctionedEntity", "UpsertFiling",
+        "UpsertAuthority", "UpsertContract",
         "AssertSameAs",
     }
     assert set(RENDERERS) == expected
