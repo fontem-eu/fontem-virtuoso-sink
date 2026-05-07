@@ -172,14 +172,103 @@ def render_assert_same_as(p: dict) -> list[Triple]:
     ]
 
 
+def render_upsert_listing(p: dict) -> list[Triple]:
+    iri = f"http://data.fontem.eu/id/Listing/{p['ticker']}"
+    company_iri = f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}"
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Listing")),
+        # The Listing → Company linkage. Using fontem:listingOf so the
+        # inverse fontem:hasListing falls out via OWL2-RL closure.
+        Triple(iri, f"{FONTEM}listingOf", _iri(company_iri)),
+        Triple(iri, f"{FONTEM}ticker",
+               _lit(p["ticker"]) or '""', is_literal=True),
+    ]
+    if exch := _lit(p.get("exchange")):
+        out.append(Triple(iri, f"{FONTEM}exchange", exch, is_literal=True))
+    if cur := _lit(p.get("currency")):
+        out.append(Triple(iri, f"{FONTEM}currency", cur, is_literal=True))
+    if (active := p.get("active")) is not None:
+        out.append(Triple(iri, f"{FONTEM}active",
+                          "true" if active else "false", is_literal=True))
+    if isin := _lit(p.get("isin")):
+        out.append(Triple(iri, f"{FONTEM}isin", isin, is_literal=True))
+    if mic := _lit(p.get("mic")):
+        out.append(Triple(iri, f"{FONTEM}mic", mic, is_literal=True))
+    return out
+
+
+def render_upsert_authority(p: dict) -> list[Triple]:
+    iri = f"http://data.fontem.eu/id/Authority/{p['authority_id']}"
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Authority")),
+    ]
+    if name := _lit(p.get("name"), lang="en"):
+        out.append(Triple(iri, RDFS_LABEL, name, is_literal=True))
+    if country := _lit(p.get("country")):
+        out.append(Triple(iri, WDT_P17, country, is_literal=True))
+    if at := _lit(p.get("authority_type")):
+        out.append(Triple(iri, f"{FONTEM}authorityType", at, is_literal=True))
+    if nid := _lit(p.get("national_id")):
+        out.append(Triple(iri, f"{FONTEM}nationalId", nid, is_literal=True))
+    if url := _lit(p.get("url")):
+        out.append(Triple(iri, f"{FONTEM}url", url, is_literal=True))
+    if pc := _lit(p.get("postal_code")):
+        out.append(Triple(iri, f"{FONTEM}postalCode", pc, is_literal=True))
+    if city := _lit(p.get("city")):
+        out.append(Triple(iri, f"{FONTEM}city", city, is_literal=True))
+    if nuts := _lit(p.get("nuts")):
+        out.append(Triple(iri, f"{FONTEM}nuts", nuts, is_literal=True))
+    return out
+
+
+def render_upsert_contract(p: dict) -> list[Triple]:
+    iri = f"http://data.fontem.eu/id/Contract/{p['ted_notice_id']}"
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Contract")),
+        Triple(iri, f"{FONTEM}tedNoticeId",
+               _lit(p["ted_notice_id"]) or '""', is_literal=True),
+    ]
+    if title := _lit(p.get("title"), lang="en"):
+        out.append(Triple(iri, RDFS_LABEL, title, is_literal=True))
+    if aid := p.get("authority_id"):
+        a_iri = f"http://data.fontem.eu/id/Authority/{aid}"
+        out.append(Triple(iri, f"{FONTEM}awardedBy", _iri(a_iri)))
+    if cid := p.get("company_gmr_id"):
+        c_iri = f"http://data.fontem.eu/id/Company/{cid}"
+        out.append(Triple(iri, f"{FONTEM}awardedTo", _iri(c_iri)))
+    if pd := (p.get("publication_date") or "").strip()[:10]:
+        out.append(Triple(iri, f"{FONTEM}publicationDate",
+                          f'"{pd}"^^<{XSD_DATE}>', is_literal=True))
+    if (v_eur := p.get("value_eur")) is not None:
+        v = _decimal(v_eur)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}valueEur", v, is_literal=True))
+    if cur := _lit(p.get("value_currency")):
+        out.append(Triple(iri, f"{FONTEM}valueCurrency", cur, is_literal=True))
+    if (v_orig := p.get("value_original")) is not None:
+        v = _decimal(v_orig)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}valueOriginal", v, is_literal=True))
+    if cpv := _lit(p.get("cpv")):
+        out.append(Triple(iri, f"{FONTEM}cpv", cpv, is_literal=True))
+    if nuts := _lit(p.get("nuts")):
+        out.append(Triple(iri, f"{FONTEM}nuts", nuts, is_literal=True))
+    if lang := _lit(p.get("language")):
+        out.append(Triple(iri, f"{FONTEM}language", lang, is_literal=True))
+    return out
+
+
 # Renderer registry. None = control event; sink doesn't render
 # triples but uses the event for structural decisions.
 RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
     "BeginGraphReplace": None,
     "EndGraphReplace": None,
     "UpsertCompany": render_upsert_company,
+    "UpsertListing": render_upsert_listing,
     "UpsertSanctionedEntity": render_upsert_sanctioned_entity,
     "UpsertFiling": render_upsert_filing,
+    "UpsertAuthority": render_upsert_authority,
+    "UpsertContract": render_upsert_contract,
     "AssertSameAs": render_assert_same_as,
 }
 
