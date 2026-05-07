@@ -172,6 +172,130 @@ def render_assert_same_as(p: dict) -> list[Triple]:
     ]
 
 
+# ── generic-schema renderers ─────────────────────────────────────
+
+
+def render_upsert_taxonomy_code(p: dict) -> list[Triple]:
+    """TaxonomyCode IRI is per-system: id/{System}/{code}.
+    Label-cased system name keeps IRIs human-readable (CPV, NUTS, …)."""
+    sys_camel = p["system"].replace("-", "_").title().replace("_", "")
+    iri = f"http://data.fontem.eu/id/{sys_camel}/{p['code']}"
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}TaxonomyCode")),
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}{sys_camel}")),
+        Triple(iri, f"{FONTEM}taxonomySystem",
+               _lit(p["system"]) or '""', is_literal=True),
+        Triple(iri, f"{FONTEM}code",
+               _lit(p["code"]) or '""', is_literal=True),
+    ]
+    if label := _lit(p.get("label"), lang=p.get("label_lang")):
+        out.append(Triple(iri, RDFS_LABEL, label, is_literal=True))
+    if (parent := p.get("parent_code")):
+        parent_iri = f"http://data.fontem.eu/id/{sys_camel}/{parent}"
+        # SKOS broader → hierarchical parent.
+        out.append(Triple(
+            iri, "http://www.w3.org/2004/02/skos/core#broader",
+            _iri(parent_iri),
+        ))
+    if (lvl := p.get("level")) is not None:
+        out.append(Triple(iri, f"{FONTEM}level",
+                          str(int(lvl)), is_literal=True))
+    if desc := _lit(p.get("description")):
+        out.append(Triple(iri, f"{FONTEM}description", desc, is_literal=True))
+    return out
+
+
+def render_upsert_relationship(p: dict) -> list[Triple]:
+    """A typed edge between two existing IRIs. Predicate is either
+    a full IRI or a fontem-shorthand resolved against the FONTEM
+    namespace."""
+    pred = p["predicate"]
+    if not pred.startswith("http"):
+        pred = f"{FONTEM}{pred}"
+    out: list[Triple] = [
+        Triple(p["src_iri"], pred, _iri(p["dst_iri"])),
+    ]
+    # valid_from / valid_to are surfaced as reified edge metadata
+    # via fontem:hasRelationshipMeta — kept off the bare triple so
+    # OWL2-RL / SHACL queries stay simple. Skipped here because the
+    # producer hasn't asked for time-windowing yet; revisit when
+    # gleif_relationships starts caring about expirations.
+    return out
+
+
+def render_upsert_disclosure(p: dict) -> list[Triple]:
+    """Disclosure IRI is per-system: id/{System}Disclosure/{disclosure_id}."""
+    sys_camel = p["system"].replace("-", "_").title().replace("_", "")
+    iri = f"http://data.fontem.eu/id/{sys_camel}Disclosure/{p['disclosure_id']}"
+    company_iri = (
+        f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}"
+    )
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Disclosure")),
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}{sys_camel}Disclosure")),
+        Triple(iri, f"{FONTEM}disclosureSystem",
+               _lit(p["system"]) or '""', is_literal=True),
+        Triple(iri, f"{FONTEM}disclosureId",
+               _lit(p["disclosure_id"]) or '""', is_literal=True),
+        Triple(iri, f"{FONTEM}filedBy", _iri(company_iri)),
+    ]
+    if dt := _lit(p.get("disclosure_type")):
+        out.append(Triple(iri, f"{FONTEM}disclosureType", dt, is_literal=True))
+    if fd := (p.get("filed_date") or "").strip()[:10]:
+        out.append(Triple(iri, f"{FONTEM}filedDate",
+                          f'"{fd}"^^<{XSD_DATE}>', is_literal=True))
+    if (yr := p.get("year")) is not None:
+        out.append(Triple(iri, f"{FONTEM}year",
+                          f'"{int(yr)}"^^<{XSD_GYEAR}>', is_literal=True))
+    if title := _lit(p.get("title"), lang="en"):
+        out.append(Triple(iri, RDFS_LABEL, title, is_literal=True))
+    if url := _lit(p.get("url")):
+        out.append(Triple(iri, f"{FONTEM}url", url, is_literal=True))
+    # `details` carries system-specific keys — we flatten one level
+    # under fontem:detail{Key} so SPARQL can filter without parsing
+    # JSON literals. Two-level nesting would need a richer mapping;
+    # producers keep `details` flat by convention.
+    for k, v in (p.get("details") or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, (int, float)):
+            lit = _decimal(v)
+            if lit is None:
+                continue
+            out.append(Triple(
+                iri, f"{FONTEM}detail_{k}", lit, is_literal=True,
+            ))
+        elif isinstance(v, str) and v:
+            out.append(Triple(
+                iri, f"{FONTEM}detail_{k}",
+                f'"{v}"', is_literal=True,
+            ))
+    return out
+
+
+def render_upsert_exchange_rate(p: dict) -> list[Triple]:
+    """ExchangeRate IRI is per-(base, target, date) — easy to dedup,
+    easy to query."""
+    iri = (
+        f"http://data.fontem.eu/id/ExchangeRate/"
+        f"{p['base']}-{p['target']}-{p['date']}"
+    )
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}ExchangeRate")),
+        Triple(iri, f"{FONTEM}base",
+               _lit(p["base"]) or '""', is_literal=True),
+        Triple(iri, f"{FONTEM}target",
+               _lit(p["target"]) or '""', is_literal=True),
+        Triple(iri, f"{FONTEM}date",
+               f'"{p["date"]}"^^<{XSD_DATE}>', is_literal=True),
+        Triple(iri, f"{FONTEM}rate",
+               _decimal(p["rate"]) or '"0"', is_literal=True),
+    ]
+    if src := _lit(p.get("source")):
+        out.append(Triple(iri, f"{FONTEM}rateSource", src, is_literal=True))
+    return out
+
+
 def render_upsert_listing(p: dict) -> list[Triple]:
     iri = f"http://data.fontem.eu/id/Listing/{p['ticker']}"
     company_iri = f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}"
@@ -269,6 +393,10 @@ RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
     "UpsertFiling": render_upsert_filing,
     "UpsertAuthority": render_upsert_authority,
     "UpsertContract": render_upsert_contract,
+    "UpsertTaxonomyCode": render_upsert_taxonomy_code,
+    "UpsertRelationship": render_upsert_relationship,
+    "UpsertDisclosure": render_upsert_disclosure,
+    "UpsertExchangeRate": render_upsert_exchange_rate,
     "AssertSameAs": render_assert_same_as,
 }
 

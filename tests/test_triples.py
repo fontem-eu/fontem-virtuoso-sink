@@ -4,8 +4,10 @@ from __future__ import annotations
 from virtuoso_sink.triples import (
     RENDERERS, render_upsert_authority,
     render_upsert_company, render_upsert_contract,
+    render_upsert_disclosure, render_upsert_exchange_rate,
     render_upsert_filing, render_upsert_listing,
-    render_upsert_sanctioned_entity, to_turtle,
+    render_upsert_relationship, render_upsert_sanctioned_entity,
+    render_upsert_taxonomy_code, to_turtle,
 )
 
 
@@ -96,6 +98,62 @@ def test_contract_links_authority_and_company() -> None:
     assert "http://data.fontem.eu/ontology#valueEur" in pmap
 
 
+def test_taxonomy_code_iri_per_system() -> None:
+    triples = render_upsert_taxonomy_code({
+        "system": "cpv", "code": "45000000",
+        "label": "Construction work", "label_lang": "en",
+    })
+    assert triples[0].s.endswith("/Cpv/45000000")
+    pmap = {t.p: t.o for t in triples}
+    assert pmap["http://data.fontem.eu/ontology#code"] == '"45000000"'
+    assert any("Construction work" in t.o for t in triples)
+
+
+def test_taxonomy_code_parent_emits_skos_broader() -> None:
+    triples = render_upsert_taxonomy_code({
+        "system": "nuts", "code": "FR101", "parent_code": "FR1",
+    })
+    pmap = {t.p: t.o for t in triples}
+    broader = pmap["http://www.w3.org/2004/02/skos/core#broader"]
+    assert "/Nuts/FR1" in broader
+
+
+def test_relationship_predicate_resolves_to_fontem() -> None:
+    triples = render_upsert_relationship({
+        "src_iri": "http://data.fontem.eu/id/Company/A",
+        "dst_iri": "http://data.fontem.eu/id/Company/B",
+        "predicate": "parentOf",
+    })
+    assert len(triples) == 1
+    assert triples[0].p == "http://data.fontem.eu/ontology#parentOf"
+
+
+def test_disclosure_links_to_filer_company() -> None:
+    triples = render_upsert_disclosure({
+        "system": "eu-lobbying",
+        "disclosure_id": "EU-TR-12345",
+        "company_gmr_id": "00040372-dad6-5d34-882c-8b8624b4e734",
+        "year": 2024, "title": "Annual declaration",
+        "details": {"total_eur_min": 200000, "fte_lobbyists": 4},
+    })
+    pmap = {t.p: t.o for t in triples}
+    filed_by = pmap["http://data.fontem.eu/ontology#filedBy"]
+    assert "Company/00040372" in filed_by
+    # Flat detail-key projection.
+    assert any(t.p.endswith("detail_total_eur_min") for t in triples)
+    assert any(t.p.endswith("detail_fte_lobbyists") for t in triples)
+
+
+def test_exchange_rate_iri_keyed_by_triple() -> None:
+    triples = render_upsert_exchange_rate({
+        "base": "EUR", "target": "USD",
+        "date": "2025-09-15", "rate": 1.0473, "source": "ecb",
+    })
+    assert triples[0].s.endswith("/ExchangeRate/EUR-USD-2025-09-15")
+    pmap = {t.p: t.o for t in triples}
+    assert pmap["http://data.fontem.eu/ontology#rateSource"] == '"ecb"'
+
+
 def test_renderer_registry_covers_all_event_types() -> None:
     # Sentinel: if we add a new event type without a renderer
     # entry, this test fails.
@@ -104,6 +162,8 @@ def test_renderer_registry_covers_all_event_types() -> None:
         "UpsertCompany", "UpsertListing",
         "UpsertSanctionedEntity", "UpsertFiling",
         "UpsertAuthority", "UpsertContract",
+        "UpsertTaxonomyCode", "UpsertRelationship",
+        "UpsertDisclosure", "UpsertExchangeRate",
         "AssertSameAs",
     }
     assert set(RENDERERS) == expected
