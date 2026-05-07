@@ -224,12 +224,13 @@ def render_upsert_relationship(p: dict) -> list[Triple]:
 
 
 def render_upsert_disclosure(p: dict) -> list[Triple]:
-    """Disclosure IRI is per-system: id/{System}Disclosure/{disclosure_id}."""
+    """Disclosure IRI is per-system: id/{System}Disclosure/{disclosure_id}.
+    company_gmr_id is optional — when absent (e.g. EU lobbying register
+    where the registrant is the Lobbyist itself), the fontem:filedBy
+    edge is skipped and the registrant identity rides in details.
+    """
     sys_camel = p["system"].replace("-", "_").title().replace("_", "")
     iri = f"http://data.fontem.eu/id/{sys_camel}Disclosure/{p['disclosure_id']}"
-    company_iri = (
-        f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}"
-    )
     out: list[Triple] = [
         Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Disclosure")),
         Triple(iri, RDF_TYPE, _iri(f"{FONTEM}{sys_camel}Disclosure")),
@@ -237,8 +238,10 @@ def render_upsert_disclosure(p: dict) -> list[Triple]:
                _lit(p["system"]) or '""', is_literal=True),
         Triple(iri, f"{FONTEM}disclosureId",
                _lit(p["disclosure_id"]) or '""', is_literal=True),
-        Triple(iri, f"{FONTEM}filedBy", _iri(company_iri)),
     ]
+    if cid := p.get("company_gmr_id"):
+        company_iri = f"http://data.fontem.eu/id/Company/{cid}"
+        out.append(Triple(iri, f"{FONTEM}filedBy", _iri(company_iri)))
     if dt := _lit(p.get("disclosure_type")):
         out.append(Triple(iri, f"{FONTEM}disclosureType", dt, is_literal=True))
     if fd := (p.get("filed_date") or "").strip()[:10]:
