@@ -44,6 +44,23 @@ class VirtuosoSink(EventConsumer):
         # handle() calls because batch_size caps each fetch.
         self._open_brackets: dict[str, list[Triple]] = defaultdict(list)
 
+        # One Client + one DigestAuth for the sink's lifetime: keepalive
+        # the TCP connection and cache the digest challenge after the
+        # first 401. Prior code recreated both per request, so every
+        # event paid a TCP handshake + a 401-challenge round-trip; that
+        # capped throughput at ~17 evt/s in production replay.
+        base = self.sparql_endpoint.rstrip("/").removesuffix("/sparql")
+        self._update_url = f"{base}/sparql-auth"
+        self._crud_url = f"{base}/sparql-graph-crud-auth"
+        self._client = httpx.Client(
+            timeout=self.timeout,
+            auth=httpx.DigestAuth(self.dba_user, self.dba_password),
+            headers={"Accept": "application/sparql-results+json"},
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
     # ── EventConsumer hook ────────────────────────────────
 
     def handle(self, batch: list[EventEnvelope]) -> None:
@@ -131,15 +148,13 @@ class VirtuosoSink(EventConsumer):
 
     def _put_replace(self, graph_iri: str, triples: list[Triple]) -> None:
         body = to_turtle(triples)
-        url = self.sparql_endpoint.rstrip("/").replace(
-            "/sparql", "/sparql-graph-crud-auth",
+        r = self._client.put(
+            self._crud_url,
+            params={"graph": graph_iri},
+            content=body,
+            headers={"Content-Type": "text/turtle"},
         )
-        params = {"graph": graph_iri}
-        auth = httpx.DigestAuth(self.dba_user, self.dba_password)
-        with httpx.Client(timeout=self.timeout, auth=auth) as c:
-            r = c.put(url, params=params, content=body,
-                      headers={"Content-Type": "text/turtle"})
-            r.raise_for_status()
+        r.raise_for_status()
         logger.info(
             "put-replace <%s>: %d triples (%d bytes)",
             graph_iri, len(triples), len(body),
@@ -164,20 +179,10 @@ class VirtuosoSink(EventConsumer):
                 f"{{ <{ev.iri}> ?p ?o }} }} ; "
                 f"INSERT DATA {{ GRAPH <{graph_iri}> {{ {triples_ttl} }} }}"
             )
-        url = self.sparql_endpoint.rstrip("/").replace(
-            "/sparql", "/sparql-auth",
-        )
-        auth = httpx.DigestAuth(self.dba_user, self.dba_password)
-        with httpx.Client(timeout=self.timeout, auth=auth) as c:
-            r = c.post(
-                url, data={"query": update},
-                headers={
-                    "Accept": "application/sparql-results+json",
-                },
-            )
-            # SPARQL endpoint accepts updates via ?query= too,
-            # but Virtuoso prefers the dedicated /sparql-auth.
-            r.raise_for_status()
+        r = self._client.post(self._update_url, data={"query": update})
+        # SPARQL endpoint accepts updates via ?query= too,
+        # but Virtuoso prefers the dedicated /sparql-auth.
+        r.raise_for_status()
         logger.debug(
             "sparql-update %s on <%s>: %d triples",
             ev.event_type, graph_iri, len(triples),
