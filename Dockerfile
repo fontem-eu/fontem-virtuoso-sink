@@ -16,12 +16,12 @@ COPY virtuoso_sink/ ./virtuoso_sink/
 # Install: gmr-events + gmr-event-schemas come from the internal
 # Gitea generic registry once published; for now we install
 # editable from sibling clones at build time.
-COPY vendor/gmr-events/      /tmp/gmr-events/
-COPY vendor/gmr-event-schemas/ /tmp/gmr-event-schemas/
-RUN pip install --no-cache-dir /tmp/gmr-event-schemas \
-                                /tmp/gmr-events \
+COPY vendor/fontem-events/      /tmp/fontem-events/
+COPY vendor/fontem-event-schemas/ /tmp/fontem-event-schemas/
+RUN pip install --no-cache-dir /tmp/fontem-event-schemas \
+                                /tmp/fontem-events \
                                 . \
- && rm -rf /tmp/gmr-events /tmp/gmr-event-schemas
+ && rm -rf /tmp/fontem-events /tmp/fontem-event-schemas
 
 # Non-root
 RUN useradd --create-home --shell /bin/bash sink
