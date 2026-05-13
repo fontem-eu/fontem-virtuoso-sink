@@ -1,7 +1,7 @@
 """Long-poll consumer entrypoint. Configured entirely via env."""
 import logging
 
-from gmr_events.consumer import ConsumerConfig
+from fontem_events.consumer import ConsumerConfig
 
 from .sink import VirtuosoSink
 

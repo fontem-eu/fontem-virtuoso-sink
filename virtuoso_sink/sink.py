@@ -22,8 +22,8 @@ from collections import defaultdict
 from typing import Iterable
 
 import httpx
-from gmr_event_schemas import EventEnvelope
-from gmr_events import EventConsumer
+from fontem_event_schemas import EventEnvelope
+from fontem_events import EventConsumer
 
 from .triples import RENDERERS, Triple, to_turtle
 
