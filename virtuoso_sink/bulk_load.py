@@ -78,17 +78,16 @@ def _file_uri(path: Path) -> str:
 def _load_one(
     client: httpx.Client,
     endpoint: str,
-    auth: tuple[str, str],
     url: str,
     graph: str,
     timeout_s: float,
 ) -> None:
     """Issue a single SPARQL ``LOAD <url> INTO GRAPH <graph>`` against
-    the Virtuoso SPARQL endpoint. Raises on non-2xx."""
+    the Virtuoso SPARQL endpoint. Raises on non-2xx. Auth is configured
+    on the client (Digest, set up in ``load_directory``)."""
     query = f"LOAD <{url}> INTO GRAPH <{graph}>"
     resp = client.post(
         endpoint,
-        auth=auth,
         data={"query": query},
         headers={"Accept": "application/sparql-results+json"},
         timeout=timeout_s,
@@ -126,7 +125,10 @@ def load_directory(
     started = time.time()
     errors = 0
 
-    with httpx.Client() as client:
+    # Virtuoso's /sparql-auth endpoint speaks HTTP Digest, not Basic —
+    # same auth pattern the steady-state sink uses (see sink.py:138).
+    digest_auth = httpx.DigestAuth(auth[0], auth[1])
+    with httpx.Client(auth=digest_auth) as client:
         for i, path in enumerate(files, start=1):
             if mode == "file":
                 url = _file_uri(path)
@@ -142,7 +144,7 @@ def load_directory(
 
             t0 = time.time()
             try:
-                _load_one(client, endpoint, auth, url, graph,
+                _load_one(client, endpoint, url, graph,
                           per_file_timeout_s)
             except (httpx.HTTPError, RuntimeError) as exc:
                 errors += 1
