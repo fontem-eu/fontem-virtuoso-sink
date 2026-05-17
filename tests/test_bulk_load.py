@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from virtuoso_sink.bulk_load import _file_uri, _list_files
+from virtuoso_sink.bulk_load import (
+    _file_uri, _list_files, _shell_quote_sql, _sparql_host_port,
+    SPARQL_LOAD_MAX_BYTES,
+)
 
 
 def _touch(d: Path, name: str, content: str = "") -> Path:
@@ -70,3 +73,38 @@ def test_file_uri_escapes_spaces(tmp_path: Path) -> None:
     # %20 is the canonical encoding for a literal space inside a file URI.
     assert "%20" in uri
     assert " " not in uri.split("file://")[1]
+
+
+def test_sparql_host_port_extracts_hostname() -> None:
+    host, port = _sparql_host_port(
+        "http://virtuoso.fontem-prod.svc.cluster.local:8890/sparql-auth"
+    )
+    assert host == "virtuoso.fontem-prod.svc.cluster.local"
+    assert port == 1111
+
+
+def test_sparql_host_port_honours_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("VIRTUOSO_ISQL_PORT", "1112")
+    _, port = _sparql_host_port("http://x:8890/sparql")
+    assert port == 1112
+
+
+def test_sparql_host_port_rejects_bare_path() -> None:
+    with pytest.raises(ValueError, match="Cannot parse"):
+        _sparql_host_port("not-a-url")
+
+
+def test_shell_quote_sql_doubles_single_quotes() -> None:
+    # Virtuoso's isql expects ''' to represent a literal single quote
+    # inside a quoted SQL string. Identifiers like 'O'Brien' must
+    # become 'O''Brien'.
+    assert _shell_quote_sql("O'Brien") == "O''Brien"
+    assert _shell_quote_sql("plain") == "plain"
+    assert _shell_quote_sql("two''already") == "two''''already"
+
+
+def test_sparql_load_max_bytes_constant_matches_virtuoso_FA008() -> None:
+    # Virtuoso 7's `LOAD <url>` reads the file as a string and returns
+    # FA008 "File ... is too large (... bytes), cannot return string
+    # content larger than 10485760 bytes". This constant must match.
+    assert SPARQL_LOAD_MAX_BYTES == 10 * 1024 * 1024

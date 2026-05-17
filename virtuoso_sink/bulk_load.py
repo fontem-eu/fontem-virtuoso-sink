@@ -42,14 +42,25 @@ import argparse
 import fnmatch
 import logging
 import os
+import re
+import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Virtuoso's SPARQL `LOAD <url>` reads the file as a string and refuses
+# anything over 10 MiB with FA008. For larger files we fall back to
+# isql + ld_dir + rdf_loader_run, which streams from disk instead of
+# materialising the file in memory.
+SPARQL_LOAD_MAX_BYTES = 10 * 1024 * 1024
+ISQL_BIN = os.environ.get(
+    "ISQL_BIN", "/opt/virtuoso-opensource/bin/isql"
+)
 
 
 def _list_files(directory: Path, pattern: str) -> list[Path]:
@@ -84,7 +95,11 @@ def _load_one(
 ) -> None:
     """Issue a single SPARQL ``LOAD <url> INTO GRAPH <graph>`` against
     the Virtuoso SPARQL endpoint. Raises on non-2xx. Auth is configured
-    on the client (Digest, set up in ``load_directory``)."""
+    on the client (Digest, set up in ``load_directory``).
+
+    Caller is responsible for keeping files under
+    ``SPARQL_LOAD_MAX_BYTES`` — Virtuoso refuses larger payloads with
+    FA008. Use ``_load_via_isql`` for anything bigger."""
     query = f"LOAD <{url}> INTO GRAPH <{graph}>"
     resp = client.post(
         endpoint,
@@ -97,6 +112,66 @@ def _load_one(
             f"SPARQL LOAD failed (HTTP {resp.status_code}) for {url}: "
             f"{resp.text[:500]}"
         )
+
+
+def _sparql_host_port(sparql_endpoint: str) -> tuple[str, int]:
+    """Pull the host:port the isql connector should target out of the
+    HTTP SPARQL endpoint we already have configured. Virtuoso's isql
+    listens on port 1111 by default; we follow that convention."""
+    u = urlparse(sparql_endpoint)
+    if not u.hostname:
+        raise ValueError(f"Cannot parse host from {sparql_endpoint!r}")
+    isql_port = int(os.environ.get("VIRTUOSO_ISQL_PORT", "1111"))
+    return u.hostname, isql_port
+
+
+def _shell_quote_sql(s: str) -> str:
+    """Quote a string for embedding into a Virtuoso SQL/SPARQL command
+    passed via ``isql exec=...``. We only need to escape single quotes
+    since isql is fed a single argv parameter, not a shell command."""
+    return s.replace("'", "''")
+
+
+def _load_via_isql(
+    *,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    directory: Path,
+    pattern: str,
+    graph: str,
+    timeout_s: float,
+) -> str:
+    """Drive Virtuoso's native bulk loader (``ld_dir`` + ``rdf_loader_run``)
+    via isql. Streams files from disk so it tolerates >10 MB payloads
+    that ``LOAD <url>`` chokes on. Returns the isql stdout for logs."""
+    if not Path(ISQL_BIN).exists():
+        raise RuntimeError(
+            f"isql binary not found at {ISQL_BIN}. The bulk_load CLI "
+            "needs isql for files > "
+            f"{SPARQL_LOAD_MAX_BYTES} bytes — install via the sink's "
+            "Dockerfile multi-stage copy."
+        )
+    g = _shell_quote_sql(graph)
+    d = _shell_quote_sql(str(directory.resolve()))
+    p = _shell_quote_sql(pattern)
+    cmd = [
+        ISQL_BIN, f"{host}:{port}", user, password,
+        f"exec=ld_dir('{d}', '{p}', '{g}'); rdf_loader_run();",
+    ]
+    logger.info("isql: ld_dir('%s', '%s', '%s') + rdf_loader_run()",
+                d, p, g)
+    res = subprocess.run(
+        cmd, capture_output=True, text=True,
+        timeout=timeout_s, check=False,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"isql ld_dir failed (rc={res.returncode}): "
+            f"stderr={res.stderr[:500]} stdout={res.stdout[:500]}"
+        )
+    return res.stdout
 
 
 def load_directory(
@@ -120,41 +195,69 @@ def load_directory(
                        directory, pattern)
         return {"files": 0, "elapsed_s": 0.0, "errors": 0}
 
-    logger.info("Loading %d files into graph %s (mode=%s)",
-                len(files), graph, mode)
+    # Decide upfront whether any file is over the HTTP-LOAD ceiling.
+    # If so, the isql path handles the whole batch in one call (much
+    # faster than per-file HTTP anyway); otherwise the HTTP path is
+    # fine and avoids needing isql in PATH.
+    max_size = max(p.stat().st_size for p in files)
+    needs_isql = max_size > SPARQL_LOAD_MAX_BYTES
+
+    logger.info(
+        "Loading %d files into graph %s (mode=%s, path=%s, max_size=%.1f MB)",
+        len(files), graph, mode, "isql" if needs_isql else "http-sparql",
+        max_size / (1024 * 1024),
+    )
     started = time.time()
     errors = 0
 
-    # Virtuoso's /sparql-auth endpoint speaks HTTP Digest, not Basic —
-    # same auth pattern the steady-state sink uses (see sink.py:138).
-    digest_auth = httpx.DigestAuth(auth[0], auth[1])
-    with httpx.Client(auth=digest_auth) as client:
-        for i, path in enumerate(files, start=1):
-            if mode == "file":
-                url = _file_uri(path)
-            elif mode == "http":
-                if not url_prefix:
-                    raise ValueError(
-                        "mode=http requires --url-prefix pointing at a "
-                        "host reachable from Virtuoso"
-                    )
-                url = url_prefix.rstrip("/") + "/" + quote(path.name)
-            else:
-                raise ValueError(f"Unknown mode: {mode}")
+    if needs_isql:
+        # One isql call drains the whole directory. ld_dir builds the
+        # work list, rdf_loader_run streams each file into the target
+        # graph. Faster than N HTTP POSTs even when the files do fit
+        # under the size cap, but we only need it when they don't.
+        host, port = _sparql_host_port(endpoint)
+        try:
+            out = _load_via_isql(
+                host=host, port=port, user=auth[0], password=auth[1],
+                directory=directory, pattern=pattern, graph=graph,
+                timeout_s=per_file_timeout_s * len(files),
+            )
+            logger.info("isql output:\n%s", out)
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            errors = len(files)
+            logger.error("isql bulk load FAILED: %s", exc)
+    else:
+        # Virtuoso's /sparql-auth endpoint speaks HTTP Digest, not Basic
+        # — same auth pattern the steady-state sink uses
+        # (see sink.py:138).
+        digest_auth = httpx.DigestAuth(auth[0], auth[1])
+        with httpx.Client(auth=digest_auth) as client:
+            for i, path in enumerate(files, start=1):
+                if mode == "file":
+                    url = _file_uri(path)
+                elif mode == "http":
+                    if not url_prefix:
+                        raise ValueError(
+                            "mode=http requires --url-prefix pointing "
+                            "at a host reachable from Virtuoso"
+                        )
+                    url = url_prefix.rstrip("/") + "/" + quote(path.name)
+                else:
+                    raise ValueError(f"Unknown mode: {mode}")
 
-            t0 = time.time()
-            try:
-                _load_one(client, endpoint, url, graph,
-                          per_file_timeout_s)
-            except (httpx.HTTPError, RuntimeError) as exc:
-                errors += 1
-                logger.error("[%d/%d] FAILED %s: %s",
-                             i, len(files), path.name, exc)
-                continue
-            elapsed = time.time() - t0
-            size_mb = path.stat().st_size / (1024 * 1024)
-            logger.info("[%d/%d] %s (%.1f MB) in %.1fs",
-                        i, len(files), path.name, size_mb, elapsed)
+                t0 = time.time()
+                try:
+                    _load_one(client, endpoint, url, graph,
+                              per_file_timeout_s)
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    errors += 1
+                    logger.error("[%d/%d] FAILED %s: %s",
+                                 i, len(files), path.name, exc)
+                    continue
+                elapsed = time.time() - t0
+                size_mb = path.stat().st_size / (1024 * 1024)
+                logger.info("[%d/%d] %s (%.1f MB) in %.1fs",
+                            i, len(files), path.name, size_mb, elapsed)
 
     summary = {
         "files": len(files) - errors,
