@@ -42,7 +42,6 @@ import argparse
 import fnmatch
 import logging
 import os
-import re
 import subprocess
 import sys
 import time
@@ -132,7 +131,7 @@ def _shell_quote_sql(s: str) -> str:
     return s.replace("'", "''")
 
 
-def _load_via_isql(
+def _load_via_isql(  # pylint: disable=too-many-arguments
     *,
     host: str,
     port: int,
@@ -143,6 +142,9 @@ def _load_via_isql(
     graph: str,
     timeout_s: float,
 ) -> str:
+    # All 8 args are kw-only and map 1:1 to a Virtuoso isql connect
+    # + ld_dir invocation; a config-struct wrapper just hides the
+    # call shape without reducing it.
     """Drive Virtuoso's native bulk loader (``ld_dir`` + ``rdf_loader_run``)
     via isql. Streams files from disk so it tolerates >10 MB payloads
     that ``LOAD <url>`` chokes on. Returns the isql stdout for logs."""
@@ -174,7 +176,7 @@ def _load_via_isql(
     return res.stdout
 
 
-def load_directory(
+def load_directory(  # pylint: disable=too-many-arguments,too-many-locals
     *,
     directory: Path,
     pattern: str,
@@ -188,6 +190,11 @@ def load_directory(
     """Load every matching file from ``directory`` into ``graph``.
 
     Returns a counts summary suitable for logging.
+
+    The arg count comes from the two-mode loader (isql vs SPARQL
+    POST) needing distinct knobs (auth tuple, URL prefix), and the
+    locals are per-file batch state — both are intrinsic to the
+    HTTP/isql split, not splitting candidates.
     """
     files = _list_files(directory, pattern)
     if not files:

@@ -15,6 +15,7 @@ which the sink handles structurally rather than as triples.
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
@@ -143,7 +144,6 @@ _FILING_FIELD_PROPS: dict[str, str] = {
 
 
 def render_upsert_filing(p: dict) -> list[Triple]:
-    import uuid
     seed = f"filing:{p['gmr_id']}:{p['year']}:{p['source']}"
     fid = uuid.uuid5(uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8"), seed)
     iri = f"http://data.fontem.eu/id/Filing/{fid}"
@@ -348,7 +348,11 @@ def render_upsert_authority(p: dict) -> list[Triple]:
     return out
 
 
-def render_upsert_contract(p: dict) -> list[Triple]:
+def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many-locals
+    # The contract has ~15 schema-defined optional fields (value,
+    # currency, dates, authority/company IRIs, CPV, NUTS, lot info)
+    # that map 1:1 to local vars used to conditionally emit triples.
+    # Splitting just shuffles the same locals across helpers.
     iri = f"http://data.fontem.eu/id/Contract/{p['ted_notice_id']}"
     out: list[Triple] = [
         Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Contract")),

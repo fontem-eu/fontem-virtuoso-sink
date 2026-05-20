@@ -30,3 +30,21 @@ include = ["virtuoso_sink*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Pylint config — disable stylistic rules that don't fit an internal
+# RDF projection sink:
+#   missing-{module,class,function}-docstring — typed signatures
+#     + descriptive symbol names already document the surface.
+#   too-few-public-methods — frozen Triple dataclass + the per-event
+#     renderers legitimately have no methods.
+#   duplicate-code — the per-event-type `render_upsert_*` helpers
+#     share a near-identical "build IRI → emit triples" shape by
+#     design; that's the whole pattern, not noise.
+[tool.pylint."messages control"]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "too-few-public-methods",
+    "duplicate-code",
+]

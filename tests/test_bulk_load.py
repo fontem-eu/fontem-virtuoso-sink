@@ -103,7 +103,7 @@ def test_shell_quote_sql_doubles_single_quotes() -> None:
     assert _shell_quote_sql("two''already") == "two''''already"
 
 
-def test_sparql_load_max_bytes_constant_matches_virtuoso_FA008() -> None:
+def test_sparql_load_max_bytes_constant_matches_virtuoso_fa008() -> None:
     # Virtuoso 7's `LOAD <url>` reads the file as a string and returns
     # FA008 "File ... is too large (... bytes), cannot return string
     # content larger than 10485760 bytes". This constant must match.

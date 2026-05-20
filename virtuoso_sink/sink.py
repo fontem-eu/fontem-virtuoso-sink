@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from typing import Iterable
 
 import httpx
 from fontem_event_schemas import EventEnvelope
@@ -30,8 +29,15 @@ from .triples import RENDERERS, Triple, to_turtle
 logger = logging.getLogger(__name__)
 
 
-class VirtuosoSink(EventConsumer):
-    """Subclass of the gmr-events EventConsumer base class."""
+class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attributes
+    """Subclass of the gmr-events EventConsumer base class.
+
+    Holds the 8 connection knobs Virtuoso requires (sparql endpoint,
+    DBA user/pwd, HTTP timeout, max retry count, batch byte cap, the
+    httpx client + the stream-load tempdir) — none are mergeable into
+    a smaller surface without introducing a config dataclass that just
+    renames the same fields.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
