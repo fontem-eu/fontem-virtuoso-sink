@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9.0.2"]
+test = ["pytest>=9.0.3"]
 
 [project.scripts]
 virtuoso-sink = "virtuoso_sink.__main__:main"
