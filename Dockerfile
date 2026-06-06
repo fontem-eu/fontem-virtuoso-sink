@@ -4,7 +4,7 @@
 # copy from the Virtuoso image — same pattern as virtuoso-exporter.
 FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.14 AS virtuoso
 
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
 RUN apt-get update -y \
