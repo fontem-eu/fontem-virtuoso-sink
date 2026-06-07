@@ -207,6 +207,7 @@ def test_iri_percent_encodes_non_ascii_characters():
     assert out2.endswith("_8282.PFTS>")
     # Plain ASCII passes through unchanged (no double-encoding even
     # if input already had % escapes from upstream).
-    assert _iri("http://data.fontem.eu/id/Company/abc-123") == "<http://data.fontem.eu/id/Company/abc-123>"
+    plain = "http://data.fontem.eu/id/Company/abc-123"
+    assert _iri(plain) == f"<{plain}>"
     # Already-encoded input must not be double-encoded.
     assert _iri("http://data.fontem.eu/id/x/%CE%A4") == "<http://data.fontem.eu/id/x/%CE%A4>"
