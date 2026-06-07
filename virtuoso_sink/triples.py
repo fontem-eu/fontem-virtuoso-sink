@@ -74,8 +74,21 @@ def _lit(value, *, lang: str | None = None,
          datatype: str | None = None) -> str | None:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
-    s = str(value).replace("\\", "\\\\").replace('"', '\\"')
-    s = s.replace("\n", "\\n").replace("\r", "\\r")
+    # Virtuoso's SPARQL parser doesn't honour \" inside a "..."
+    # literal — it terminates the string at the first \" and chokes
+    # on whatever follows. Escape to the Unicode codepoint \u0022
+    # instead; that's portable across all RFC-compliant SPARQL
+    # implementations and Virtuoso's parser handles it cleanly.
+    # Same logic for the other control chars: use the Turtle/SPARQL
+    # \u escape syntax, not the C-style \n.
+    s = (
+        str(value)
+        .replace("\\", "\\u005C")
+        .replace('"', '\\u0022')
+        .replace("\n", "\\u000A")
+        .replace("\r", "\\u000D")
+        .replace("\t", "\\u0009")
+    )
     out = f'"{s}"'
     if lang:
         out += f"@{lang}"
