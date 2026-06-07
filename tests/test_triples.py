@@ -184,3 +184,30 @@ def test_renderer_registry_covers_all_event_types() -> None:
         "AssertSameAs",
     }
     assert set(RENDERERS) == expected
+
+
+
+def test_iri_percent_encodes_non_ascii_characters():
+    """Greek/Cyrillic/etc. characters in an IRI body must be percent-
+    encoded so Virtuoso's SPARQL parser doesn't 500 the entire
+    UPDATE. Without this fix we lost ~1k events for every cluster
+    of Unicode-named Companies/Listings in the prod load — Virtuoso
+    rejected the batch and the consumer offset wouldn't advance."""
+    from virtuoso_sink.triples import _iri  # pylint: disable=import-outside-toplevel
+    # Greek Listing IRI seen in prod load
+    out = _iri("http://data.fontem.eu/id/Listing/ΤΕΧΝΙΚΗ.AT")
+    expected = (
+        "<http://data.fontem.eu/id/Listing/"
+        "%CE%A4%CE%95%CE%A7%CE%9D%CE%99%CE%9A%CE%97.AT>"
+    )
+    assert out == expected
+    # Cyrillic Listing IRI seen in prod load
+    out2 = _iri("http://data.fontem.eu/id/Listing/ТОВАРИСТ_8282.PFTS")
+    assert "%D0" in out2  # Cyrillic UTF-8 high byte
+    assert out2.endswith("_8282.PFTS>")
+    # Plain ASCII passes through unchanged (no double-encoding even
+    # if input already had % escapes from upstream).
+    plain = "http://data.fontem.eu/id/Company/abc-123"
+    assert _iri(plain) == f"<{plain}>"
+    # Already-encoded input must not be double-encoded.
+    assert _iri("http://data.fontem.eu/id/x/%CE%A4") == "<http://data.fontem.eu/id/x/%CE%A4>"
