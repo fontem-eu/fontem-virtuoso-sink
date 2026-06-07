@@ -211,3 +211,34 @@ def test_iri_percent_encodes_non_ascii_characters():
     assert _iri(plain) == f"<{plain}>"
     # Already-encoded input must not be double-encoded.
     assert _iri("http://data.fontem.eu/id/x/%CE%A4") == "<http://data.fontem.eu/id/x/%CE%A4>"
+
+
+
+def test_lit_escapes_quote_with_unicode_codepoint():
+    """Virtuoso's SPARQL parser terminates a "..." literal at the
+    first \" and chokes on the rest — confirmed in prod against the
+    Polish company name PRZEDSIĘBIORSTWO \"KONSPOL-BIS\" SPÓŁKA.
+    Escape doublequotes via \u0022 so Virtuoso reads them as a
+    single character in the string body, not as a delimiter."""
+    from virtuoso_sink.triples import _lit  # pylint: disable=import-outside-toplevel
+    out = _lit('PRZEDSIĘBIORSTWO "KONSPOL-BIS" SPÓŁKA')
+    assert out is not None
+    assert '\\u0022' in out
+    # End quote is still a literal " (the wrapping pair)
+    assert out.startswith('"')
+    assert out.endswith('"')
+
+
+def test_lit_escapes_backslash_with_unicode_codepoint():
+    from virtuoso_sink.triples import _lit  # pylint: disable=import-outside-toplevel
+    out = _lit('C:\\path\\to\\thing')
+    assert out is not None
+    assert '\\u005C' in out
+    assert '\\\\' not in out  # no double-backslash style escapes
+
+
+def test_lit_escapes_newline_with_unicode_codepoint():
+    from virtuoso_sink.triples import _lit  # pylint: disable=import-outside-toplevel
+    out = _lit('first\nsecond')
+    assert out is not None
+    assert '\\u000A' in out
