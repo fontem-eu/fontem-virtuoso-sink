@@ -39,8 +39,35 @@ class Triple:
     is_literal: bool = False
 
 
+_QUOTE = None  # cached at module level via the helper below
+
+
+def _percent_encode_iri(s: str) -> str:
+    """Lazily import urllib.parse.quote on first use so the module
+    import path stays cheap; cached for subsequent calls."""
+    global _QUOTE  # pylint: disable=global-statement
+    if _QUOTE is None:
+        from urllib.parse import quote  # pylint: disable=import-outside-toplevel
+        _QUOTE = quote
+    return _QUOTE(s, safe="%:/?#[]@!$&\'()*+,;=._-~")
+
+
 def _iri(s: str) -> str:
-    return f"<{s}>"
+    """Wrap an IRI string in angle brackets, percent-encoding any
+    non-ASCII characters in the path/fragment.
+
+    Virtuoso's SPARQL parser doesn't fully implement RFC 3987 IRIs —
+    a raw Greek/Cyrillic/etc. character in the IRI body crashes the
+    parser and the whole SPARQL UPDATE 500s. RFC 3986 says non-ASCII
+    must be percent-encoded for safe interchange, so we do that here
+    and let Virtuoso see plain ASCII. Round-trip is lossless: the IRI
+    decodes back to the same Unicode string in any client that
+    follows the RFC.
+
+    The `safe` set covers every reserved + unreserved character that
+    can legally appear unencoded in a URI, plus the percent itself so
+    we don't double-encode an already-encoded IRI from upstream."""
+    return f"<{_percent_encode_iri(s)}>"
 
 
 def _lit(value, *, lang: str | None = None,

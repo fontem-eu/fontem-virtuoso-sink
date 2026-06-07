@@ -171,19 +171,27 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # domain. For now we use the same name->graph convention
         # as the existing migrate script.
         graph_iri = self._domain_default_graph(ev.domain)
+        # Percent-encode the subject IRI so non-ASCII characters
+        # (Greek company names, Cyrillic listings, etc.) don't crash
+        # Virtuoso's SPARQL parser. Same reasoning as _iri() in
+        # triples.py — Virtuoso doesn't fully implement RFC 3987.
+        from urllib.parse import quote  # pylint: disable=import-outside-toplevel
+        _safe = "%:/?#[]@!$&\'()*+,;=._-~"
+        s_iri = quote(ev.iri, safe=_safe)
+        g_iri = quote(graph_iri, safe=_safe)
         if ev.op == "delete":
             update = (
-                f"DELETE WHERE {{ GRAPH <{graph_iri}> "
-                f"{{ <{ev.iri}> ?p ?o }} }}"
+                f"DELETE WHERE {{ GRAPH <{g_iri}> "
+                f"{{ <{s_iri}> ?p ?o }} }}"
             )
         else:
             # Upsert: delete the existing subject, then insert
             # the new triples. Within one transaction.
             triples_ttl = to_turtle(triples).rstrip()
             update = (
-                f"DELETE WHERE {{ GRAPH <{graph_iri}> "
-                f"{{ <{ev.iri}> ?p ?o }} }} ; "
-                f"INSERT DATA {{ GRAPH <{graph_iri}> {{ {triples_ttl} }} }}"
+                f"DELETE WHERE {{ GRAPH <{g_iri}> "
+                f"{{ <{s_iri}> ?p ?o }} }} ; "
+                f"INSERT DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
             )
         r = self._client.post(self._update_url, data={"query": update})
         # SPARQL endpoint accepts updates via ?query= too,
