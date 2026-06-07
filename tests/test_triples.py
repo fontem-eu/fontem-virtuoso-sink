@@ -196,7 +196,11 @@ def test_iri_percent_encodes_non_ascii_characters():
     from virtuoso_sink.triples import _iri  # pylint: disable=import-outside-toplevel
     # Greek Listing IRI seen in prod load
     out = _iri("http://data.fontem.eu/id/Listing/ΤΕΧΝΙΚΗ.AT")
-    assert out == "<http://data.fontem.eu/id/Listing/%CE%A4%CE%95%CE%A7%CE%9D%CE%99%CE%9A%CE%97.AT>"
+    expected = (
+        "<http://data.fontem.eu/id/Listing/"
+        "%CE%A4%CE%95%CE%A7%CE%9D%CE%99%CE%9A%CE%97.AT>"
+    )
+    assert out == expected
     # Cyrillic Listing IRI seen in prod load
     out2 = _iri("http://data.fontem.eu/id/Listing/ТОВАРИСТ_8282.PFTS")
     assert "%D0" in out2  # Cyrillic UTF-8 high byte
