@@ -29,6 +29,22 @@ from .triples import RENDERERS, Triple, to_turtle
 logger = logging.getLogger(__name__)
 
 
+# Virtuoso's /sparql-auth endpoint silently prepends
+# ``define sql:big-data-const 0`` before any UPDATE we send. That
+# variant of the inline-constant path consults the RDF_OBJ hash
+# cache for large literal/IRI hashes, and entities whose previous
+# write left stale hash-cache entries blow up with SR580 ("RDF box
+# refers to row with RO_ID = X of table RDF_OBJ, but no such row in
+# the table"). Each SR580 leaves a dirty hash entry behind; under
+# the sink's write rate they accumulate until the Virtuoso process
+# OOM-kills. Setting the directive back to 1 forces the
+# fresh-insertion path that doesn't touch the cache. The endpoint's
+# prepend goes first; ours lands after; Virtuoso honours the last
+# define for any given directive. Mirrors the same fix already
+# applied in fontem-api's wikidata_writer.
+_BIG_DATA_CONST_OVERRIDE = "define sql:big-data-const 1\n"
+
+
 class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attributes
     """Subclass of the gmr-events EventConsumer base class.
 
@@ -193,7 +209,10 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 f"{{ <{s_iri}> ?p ?o }} }} ; "
                 f"INSERT DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
             )
-        r = self._client.post(self._update_url, data={"query": update})
+        r = self._client.post(
+            self._update_url,
+            data={"query": _BIG_DATA_CONST_OVERRIDE + update},
+        )
         # SPARQL endpoint accepts updates via ?query= too,
         # but Virtuoso prefers the dedicated /sparql-auth.
         r.raise_for_status()

@@ -1,0 +1,103 @@
+"""SPARQL UPDATE path tests — verify the big-data-const override."""
+# Tests legitimately reach into the sink's private API: the directive
+# behaviour we want to lock down sits on _sparql_update and _client.
+# pylint: disable=protected-access,redefined-outer-name,import-outside-toplevel
+from __future__ import annotations
+
+import os
+from collections import defaultdict
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+@pytest.fixture
+def sink_env(monkeypatch):
+    monkeypatch.setenv("VIRTUOSO_SPARQL_URL", "http://virtuoso.test:8890/sparql")
+    monkeypatch.setenv("VIRTUOSO_DBA_USER", "dba")
+    monkeypatch.setenv("VIRTUOSO_DBA_PASSWORD", "secret")
+    monkeypatch.setenv("EVENTS_KAFKA_BOOTSTRAP", "kafka.test:9092")
+    monkeypatch.setenv("EVENTS_TOPIC", "events.entity_events")
+    monkeypatch.setenv("EVENTS_GROUP_ID", "virtuoso-sink-test")
+
+
+def _make_sink():
+    """Build a sink with the httpx client mocked. EventConsumer init
+    needs Kafka — stub it; we only exercise the sparql_update path."""
+    from virtuoso_sink.sink import VirtuosoSink
+
+    with patch("virtuoso_sink.sink.EventConsumer.__init__", lambda self, *a, **k: None):
+        sink = VirtuosoSink.__new__(VirtuosoSink)
+        sink.sparql_endpoint = os.environ["VIRTUOSO_SPARQL_URL"]
+        sink.dba_user = "dba"
+        sink.dba_password = "secret"
+        sink.timeout = 30.0
+        sink._open_brackets = defaultdict(list)
+        base = sink.sparql_endpoint.rstrip("/").removesuffix("/sparql")
+        sink._update_url = f"{base}/sparql-auth"
+        sink._crud_url = f"{base}/sparql-graph-crud-auth"
+        sink._client = MagicMock()
+        sink._client.post.return_value = MagicMock(
+            raise_for_status=MagicMock(return_value=None),
+        )
+    return sink
+
+
+def _ev(op: str, iri: str = "http://data.fontem.eu/id/Company/abc", domain: str = "company"):
+    ev = MagicMock()
+    ev.op = op
+    ev.iri = iri
+    ev.domain = domain
+    ev.event_type = f"{domain}.{op}"
+    return ev
+
+
+def test_insert_update_prepends_big_data_const_directive(sink_env):  # pylint: disable=unused-argument
+    """An upsert UPDATE must start with `define sql:big-data-const 1` —
+    without it, /sparql-auth's silent `0` prepend pushes the query down
+    the cache-consulting path that SR580s and leaks dirty hash entries.
+    """
+    sink = _make_sink()
+    from virtuoso_sink.triples import Triple
+
+    triples = [
+        Triple(
+            "http://data.fontem.eu/id/Company/abc",
+            "http://www.w3.org/2000/01/rdf-schema#label",
+            '"Acme"',
+        ),
+    ]
+    sink._sparql_update(_ev("insert"), triples)
+
+    sink._client.post.assert_called_once()
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert body.startswith("define sql:big-data-const 1\n"), body[:80]
+    assert "DELETE WHERE" in body
+    assert "INSERT DATA" in body
+
+
+def test_delete_update_prepends_big_data_const_directive(sink_env):  # pylint: disable=unused-argument
+    """DELETE-only events still walk the same hash-cache path; same
+    SR580 risk, same directive required."""
+    sink = _make_sink()
+    sink._sparql_update(_ev("delete"), [])
+
+    sink._client.post.assert_called_once()
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert body.startswith("define sql:big-data-const 1\n"), body[:80]
+    assert "DELETE WHERE" in body
+    assert "INSERT DATA" not in body
+
+
+def test_update_post_targets_sparql_auth_endpoint(sink_env):  # pylint: disable=unused-argument
+    """The override is moot if the request lands at the wrong endpoint.
+    Lock the URL down so a future refactor that swaps it silently still
+    trips this test."""
+    sink = _make_sink()
+    from virtuoso_sink.triples import Triple
+
+    sink._sparql_update(
+        _ev("insert"),
+        [Triple("http://x/a", "http://x/p", '"v"')],
+    )
+    assert sink._client.post.call_args.args[0] == "http://virtuoso.test:8890/sparql-auth"
