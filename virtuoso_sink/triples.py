@@ -308,11 +308,16 @@ def render_upsert_disclosure(p: dict) -> list[Triple]:
             out.append(Triple(
                 iri, f"{FONTEM}detail_{k}", lit, is_literal=True,
             ))
-        elif isinstance(v, str) and v:
-            out.append(Triple(
-                iri, f"{FONTEM}detail_{k}",
-                f'"{v}"', is_literal=True,
-            ))
+        elif isinstance(v, str):
+            # Must escape via _lit — Virtuoso's SPARQL parser closes
+            # the literal on the first un-escaped quote and 400s on
+            # the rest. Real example: eu-cohesion description with
+            # an embedded "multi-hazard flooding" jammed virtuoso_sink
+            # at seq 4,806,634 from 2026-06-09 until this fix.
+            if lit := _lit(v):
+                out.append(Triple(
+                    iri, f"{FONTEM}detail_{k}", lit, is_literal=True,
+                ))
     return out
 
 

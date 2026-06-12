@@ -144,6 +144,50 @@ def test_disclosure_links_to_filer_company() -> None:
     assert any(t.p.endswith("detail_fte_lobbyists") for t in triples)
 
 
+def test_disclosure_detail_string_escapes_embedded_quotes() -> None:
+    """Reproduces the eu-cohesion poison event at seq 4,806,634 that
+    jammed virtuoso_sink from 2026-06-09 to 2026-06-12. The Guadeloupe
+    project description contained an embedded "multi-hazard flooding"
+    quoted phrase; the renderer wrapped the raw string in '"..."'
+    without escaping, Virtuoso closed the literal at the first inner
+    quote and 400'd. Detail-string values must escape through _lit so
+    embedded quotes survive as \\u0022."""
+    triples = render_upsert_disclosure({
+        "system": "eu-cohesion",
+        "disclosure_id": "Q7356886",
+        "year": 2024,
+        "details": {
+            "description": (
+                'A "multi-hazard flooding" approach addresses '
+                'flood risk regardless of origin.'
+            ),
+        },
+    })
+    detail_objs = [t.o for t in triples if t.p.endswith("detail_description")]
+    assert len(detail_objs) == 1
+    body = detail_objs[0]
+    # No bare unescaped inner quotes — the only quotes that survive
+    # in the Turtle literal are the outer wrappers.
+    assert body.startswith('"') and body.endswith('"')
+    assert '"' not in body[1:-1]
+    # The inner quotes must have been escaped to the Unicode codepoint.
+    assert '\\u0022' in body
+
+
+def test_disclosure_detail_string_drops_empty_values() -> None:
+    """_lit returns None for empty/whitespace-only strings; the detail
+    branch must skip them rather than emit an empty literal."""
+    triples = render_upsert_disclosure({
+        "system": "cdp",
+        "disclosure_id": "X-1",
+        "year": 2024,
+        "details": {"description": "  ", "country": "FRA"},
+    })
+    detail_preds = {t.p for t in triples if "detail_" in t.p}
+    assert any(p.endswith("detail_country") for p in detail_preds)
+    assert not any(p.endswith("detail_description") for p in detail_preds)
+
+
 def test_disclosure_omits_filed_by_when_no_company() -> None:
     """EU lobbying register entries are filed by the Lobbyist itself —
     no parent Company. The renderer must skip the filedBy triple
