@@ -286,3 +286,60 @@ def test_lit_escapes_newline_with_unicode_codepoint():
     out = _lit('first\nsecond')
     assert out is not None
     assert '\\u000A' in out
+
+
+def test_contract_emits_integrity_fields_and_flags() -> None:
+    """Integrity fields + keystone red flags are emitted as typed triples,
+    matching the Neo4j sink: a single-bidder no-call price-only award."""
+    triples = render_upsert_contract({
+        "ted_notice_id": "n-int",
+        "tenders_received": 1,
+        "procedure_type": "neg-wo-call",
+        "award_criterion_type": "price",
+        "submission_deadline": "2026-03-15T12:00:00",
+        "funding_programme": "HORIZON-EU",
+        "is_framework": False,
+        "eu_funded": True,
+    })
+    pmap = {t.p: t.o for t in triples}
+    f = "http://data.fontem.eu/ontology#"
+    assert pmap[f + "tendersReceived"] == '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'
+    assert pmap[f + "submissionDeadline"] == '"2026-03-15"^^<http://www.w3.org/2001/XMLSchema#date>'
+    assert pmap[f + "fundingProgramme"] == '"HORIZON-EU"'
+    assert f + "procedureType" in pmap
+    assert "true" in pmap[f + "isSingleBidder"]
+    assert "true" in pmap[f + "isNonOpen"]
+    assert "true" in pmap[f + "isNoCall"]
+    assert "true" in pmap[f + "isPriceOnly"]
+    assert pmap[f + "integrityRedFlags"] == '"4"^^<http://www.w3.org/2001/XMLSchema#integer>'
+    assert "false" in pmap[f + "isFramework"]   # meaningful boolean false
+    assert "true" in pmap[f + "euFunded"]
+
+
+def test_contract_emits_all_optional_scalar_fields() -> None:
+    """Exercise every optional branch of render_upsert_contract (dates,
+    value variants, cpv, nuts, language) so new-code coverage is complete."""
+    triples = render_upsert_contract({
+        "ted_notice_id": "n-full",
+        "title": "Full contract",
+        "authority_id": "a1",
+        "company_gmr_id": "c1",
+        "publication_date": "2026-02-01T00:00:00",
+        "value_eur": 1234.50,
+        "value_currency": "EUR",
+        "value_original": 1000.00,
+        "cpv": "72000000",
+        "nuts": "HU110",
+        "language": "hu",
+    })
+    f = "http://data.fontem.eu/ontology#"
+    pmap = {t.p: t.o for t in triples}
+    assert f + "publicationDate" in pmap
+    assert f + "valueEur" in pmap
+    assert pmap[f + "valueCurrency"] == '"EUR"'
+    assert f + "valueOriginal" in pmap
+    assert pmap[f + "cpv"] == '"72000000"'
+    assert pmap[f + "nuts"] == '"HU110"'
+    assert pmap[f + "language"] == '"hu"'
+    assert pmap[f + "awardedBy"].startswith("<http://data.fontem.eu/id/Authority/a1")
+    assert pmap[f + "awardedTo"].startswith("<http://data.fontem.eu/id/Company/c1")

@@ -48,6 +48,12 @@ jobs:
     runs-on: python
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so SonarQube can blame-diff new vs
+          # existing code; a shallow clone makes it treat the
+          # whole project as new and measure new-coverage over
+          # every file (the gate then fails on unrelated code).
+          fetch-depth: 0
       - name: Install dependencies and generate coverage
         env:
           GMR_CI_READ_TOKEN: ${{ secrets.GMR_CI_READ_TOKEN }}

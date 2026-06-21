@@ -19,6 +19,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable
 
+from fontem_event_schemas.integrity import contract_red_flags
+
 FONTEM = "http://data.fontem.eu/ontology#"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
@@ -27,6 +29,8 @@ WDT_P17 = "http://www.wikidata.org/prop/direct/P17"  # country
 XSD_DATE = "http://www.w3.org/2001/XMLSchema#date"
 XSD_DECIMAL = "http://www.w3.org/2001/XMLSchema#decimal"
 XSD_GYEAR = "http://www.w3.org/2001/XMLSchema#gYear"
+XSD_BOOLEAN = "http://www.w3.org/2001/XMLSchema#boolean"
+XSD_INTEGER = "http://www.w3.org/2001/XMLSchema#integer"
 
 OWL_SAME_AS = "http://www.w3.org/2002/07/owl#sameAs"
 
@@ -393,6 +397,23 @@ def render_upsert_authority(p: dict) -> list[Triple]:
     return out
 
 
+def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
+    """Monetary-value triples (eur / currency / original), split out of
+    render_upsert_contract to keep its cognitive complexity in check."""
+    out: list[Triple] = []
+    if (v_eur := p.get("value_eur")) is not None:
+        v = _decimal(v_eur)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}valueEur", v, is_literal=True))
+    if cur := _lit(p.get("value_currency")):
+        out.append(Triple(iri, f"{FONTEM}valueCurrency", cur, is_literal=True))
+    if (v_orig := p.get("value_original")) is not None:
+        v = _decimal(v_orig)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}valueOriginal", v, is_literal=True))
+    return out
+
+
 def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many-locals
     # The contract has ~15 schema-defined optional fields (value,
     # currency, dates, authority/company IRIs, CPV, NUTS, lot info)
@@ -415,22 +436,50 @@ def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many
     if pd := (p.get("publication_date") or "").strip()[:10]:
         out.append(Triple(iri, f"{FONTEM}publicationDate",
                           f'"{pd}"^^<{XSD_DATE}>', is_literal=True))
-    if (v_eur := p.get("value_eur")) is not None:
-        v = _decimal(v_eur)
-        if v is not None:
-            out.append(Triple(iri, f"{FONTEM}valueEur", v, is_literal=True))
-    if cur := _lit(p.get("value_currency")):
-        out.append(Triple(iri, f"{FONTEM}valueCurrency", cur, is_literal=True))
-    if (v_orig := p.get("value_original")) is not None:
-        v = _decimal(v_orig)
-        if v is not None:
-            out.append(Triple(iri, f"{FONTEM}valueOriginal", v, is_literal=True))
+    out.extend(_contract_value_triples(iri, p))
     if cpv := _lit(p.get("cpv")):
         out.append(Triple(iri, f"{FONTEM}cpv", cpv, is_literal=True))
     if nuts := _lit(p.get("nuts")):
         out.append(Triple(iri, f"{FONTEM}nuts", nuts, is_literal=True))
     if lang := _lit(p.get("language")):
         out.append(Triple(iri, f"{FONTEM}language", lang, is_literal=True))
+    out.extend(_contract_integrity_triples(iri, p))
+    return out
+
+
+_INTEGRITY_FLAGS = (
+    ("is_framework", "isFramework"), ("eu_funded", "euFunded"),
+    ("is_single_bidder", "isSingleBidder"), ("is_non_open", "isNonOpen"),
+    ("is_no_call", "isNoCall"), ("is_price_only", "isPriceOnly"),
+)
+
+
+def _contract_integrity_triples(iri: str, p: dict) -> list[Triple]:
+    """Tender-integrity fields + the shared keystone's red flags, so SPARQL
+    carries the same single-bidder / CRI signals as Neo4j. Split out of
+    render_upsert_contract to keep that function's branch count in check."""
+    out: list[Triple] = []
+    if proc := _lit(p.get("procedure_type")):
+        out.append(Triple(iri, f"{FONTEM}procedureType", proc, is_literal=True))
+    if (tr := p.get("tenders_received")) is not None:
+        out.append(Triple(iri, f"{FONTEM}tendersReceived",
+                          f'"{int(tr)}"^^<{XSD_INTEGER}>', is_literal=True))
+    if crit := _lit(p.get("award_criterion_type")):
+        out.append(Triple(iri, f"{FONTEM}awardCriterionType", crit, is_literal=True))
+    if dl := (p.get("submission_deadline") or "").strip()[:10]:
+        out.append(Triple(iri, f"{FONTEM}submissionDeadline",
+                          f'"{dl}"^^<{XSD_DATE}>', is_literal=True))
+    if fp := _lit(p.get("funding_programme")):
+        out.append(Triple(iri, f"{FONTEM}fundingProgramme", fp, is_literal=True))
+    flags = dict(contract_red_flags(p))
+    for fld, pred in _INTEGRITY_FLAGS:
+        b = p.get(fld) if fld in ("is_framework", "eu_funded") else flags.get(fld)
+        if b is not None:
+            out.append(Triple(iri, f"{FONTEM}{pred}",
+                              f'"{str(bool(b)).lower()}"^^<{XSD_BOOLEAN}>', is_literal=True))
+    if (rf := flags.get("integrity_red_flags")) is not None:
+        out.append(Triple(iri, f"{FONTEM}integrityRedFlags",
+                          f'"{int(rf)}"^^<{XSD_INTEGER}>', is_literal=True))
     return out
 
 
