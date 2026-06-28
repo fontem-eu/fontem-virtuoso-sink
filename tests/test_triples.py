@@ -343,3 +343,19 @@ def test_contract_emits_all_optional_scalar_fields() -> None:
     assert pmap[f + "language"] == '"hu"'
     assert pmap[f + "awardedBy"].startswith("<http://data.fontem.eu/id/Authority/a1")
     assert pmap[f + "awardedTo"].startswith("<http://data.fontem.eu/id/Company/c1")
+
+
+def test_contract_emits_procedure_and_modification_triples() -> None:
+    """procedure_id + notice_type (and modifies_publication_number on
+    modifications) render as triples — the join keys for MODIFIES."""
+    triples = render_upsert_contract({
+        "ted_notice_id": "n-mod",
+        "procedure_id": "proc-7bcd",
+        "notice_type": "can-modif",
+        "modifies_publication_number": "708565-2022",
+    })
+    pmap = {t.p: t.o for t in triples}
+    f = "http://data.fontem.eu/ontology#"
+    assert pmap[f + "procedureId"] == '"proc-7bcd"'
+    assert pmap[f + "noticeType"] == '"can-modif"'
+    assert pmap[f + "modifiesPublicationNumber"] == '"708565-2022"'

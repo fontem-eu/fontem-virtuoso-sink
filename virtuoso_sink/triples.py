@@ -454,7 +454,7 @@ _INTEGRITY_FLAGS = (
 )
 
 
-def _contract_integrity_triples(iri: str, p: dict) -> list[Triple]:
+def _contract_integrity_triples(iri: str, p: dict) -> list[Triple]:  # pylint: disable=too-many-locals
     """Tender-integrity fields + the shared keystone's red flags, so SPARQL
     carries the same single-bidder / CRI signals as Neo4j. Split out of
     render_upsert_contract to keep that function's branch count in check."""
@@ -471,6 +471,15 @@ def _contract_integrity_triples(iri: str, p: dict) -> list[Triple]:
                           f'"{dl}"^^<{XSD_DATE}>', is_literal=True))
     if fp := _lit(p.get("funding_programme")):
         out.append(Triple(iri, f"{FONTEM}fundingProgramme", fp, is_literal=True))
+    # eForms procedure id + notice type, and (on modifications) the original
+    # award's publication-number — the join keys the MODIFIES linking pass uses.
+    if proc_id := _lit(p.get("procedure_id")):
+        out.append(Triple(iri, f"{FONTEM}procedureId", proc_id, is_literal=True))
+    if nt := _lit(p.get("notice_type")):
+        out.append(Triple(iri, f"{FONTEM}noticeType", nt, is_literal=True))
+    if mpn := _lit(p.get("modifies_publication_number")):
+        out.append(Triple(iri, f"{FONTEM}modifiesPublicationNumber", mpn,
+                          is_literal=True))
     flags = dict(contract_red_flags(p))
     for fld, pred in _INTEGRITY_FLAGS:
         b = p.get(fld) if fld in ("is_framework", "eu_funded") else flags.get(fld)
