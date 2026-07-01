@@ -328,6 +328,8 @@ def test_contract_emits_all_optional_scalar_fields() -> None:
         "value_eur": 1234.50,
         "value_currency": "EUR",
         "value_original": 1000.00,
+        "value_before_eur": 800.00,
+        "value_before_original": 640.00,
         "cpv": "72000000",
         "nuts": "HU110",
         "language": "hu",
@@ -338,6 +340,8 @@ def test_contract_emits_all_optional_scalar_fields() -> None:
     assert f + "valueEur" in pmap
     assert pmap[f + "valueCurrency"] == '"EUR"'
     assert f + "valueOriginal" in pmap
+    assert f + "valueBeforeEur" in pmap
+    assert f + "valueBeforeOriginal" in pmap
     assert pmap[f + "cpv"] == '"72000000"'
     assert pmap[f + "nuts"] == '"HU110"'
     assert pmap[f + "language"] == '"hu"'

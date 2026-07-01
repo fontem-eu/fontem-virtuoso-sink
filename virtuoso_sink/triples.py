@@ -411,6 +411,20 @@ def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
         v = _decimal(v_orig)
         if v is not None:
             out.append(Triple(iri, f"{FONTEM}valueOriginal", v, is_literal=True))
+    # Pre-modification totals (legacy F20 self-contains before+after); the
+    # before->after delta is the value-change corruption signal.
+    if (v_before := p.get("value_before_eur")) is not None:
+        v = _decimal(v_before)
+        if v is not None:
+            out.append(
+                Triple(iri, f"{FONTEM}valueBeforeEur", v, is_literal=True)
+            )
+    if (v_before_orig := p.get("value_before_original")) is not None:
+        v = _decimal(v_before_orig)
+        if v is not None:
+            out.append(
+                Triple(iri, f"{FONTEM}valueBeforeOriginal", v, is_literal=True)
+            )
     return out
 
 
