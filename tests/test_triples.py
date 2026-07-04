@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from virtuoso_sink.triples import (
+    render_upsert_investment_fund,
     RENDERERS, render_upsert_authority,
     render_upsert_company, render_upsert_contract,
     render_upsert_disclosure, render_upsert_exchange_rate,
@@ -220,7 +221,7 @@ def test_renderer_registry_covers_all_event_types() -> None:
     # entry, this test fails.
     expected = {
         "BeginGraphReplace", "EndGraphReplace",
-        "UpsertCompany", "UpsertListing",
+        "UpsertCompany", "UpsertInvestmentFund", "UpsertListing",
         "UpsertSanctionedEntity", "UpsertFiling",
         "UpsertAuthority", "UpsertContract",
         "UpsertTaxonomyCode", "UpsertRelationship",
@@ -363,3 +364,59 @@ def test_contract_emits_procedure_and_modification_triples() -> None:
     assert pmap[f + "procedureId"] == '"proc-7bcd"'
     assert pmap[f + "noticeType"] == '"can-modif"'
     assert pmap[f + "modifiesPublicationNumber"] == '"708565-2022"'
+
+
+# ── InvestmentFund entity + fund-unit listings ────────────────────
+
+
+def test_investment_fund_renderer_types_and_props():
+    triples = render_upsert_investment_fund({
+        "gmr_id": "0b6cbfa6-6a30-5efc-9b4f-3e56d0f3f5a2",
+        "name": "EXAMPLE UCITS FUND",
+        "lei": "2138008K5B3Z4E8DHN12",
+        "fund_type": "Open-End Fund",
+    })
+    subj = "http://data.fontem.eu/id/InvestmentFund/0b6cbfa6-6a30-5efc-9b4f-3e56d0f3f5a2"
+    by_pred = {t.p: t for t in triples}
+    assert all(t.s == subj for t in triples)
+    assert "InvestmentFund" in by_pred[
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"].o
+    assert by_pred["http://data.fontem.eu/ontology#fundType"].o == '"Open-End Fund"'
+
+
+def test_listing_of_fund_unit_points_at_investment_fund():
+    """A fund-class security_type routes listingOf at the
+    InvestmentFund subject, not the Company one."""
+    triples = render_upsert_listing({
+        "ticker": "TPLGMFB", "company_gmr_id": "g1",
+        "exchange": "GU", "security_type": "Open-End Fund",
+    })
+    listing_of = [t for t in triples
+                  if t.p == "http://data.fontem.eu/ontology#listingOf"][0]
+    assert "/id/InvestmentFund/g1" in listing_of.o
+    sec = [t for t in triples
+           if t.p == "http://data.fontem.eu/ontology#securityType"][0]
+    assert sec.o == '"Open-End Fund"'
+
+
+def test_listing_of_common_stock_still_points_at_company():
+    triples = render_upsert_listing({
+        "ticker": "EGL", "company_gmr_id": "g1",
+        "exchange": "PL", "security_type": "Common Stock",
+    })
+    listing_of = [t for t in triples
+                  if t.p == "http://data.fontem.eu/ontology#listingOf"][0]
+    assert "/id/Company/g1" in listing_of.o
+
+
+def test_listing_without_security_type_defaults_to_company():
+    """Legacy events (no security_type) keep the Company linkage —
+    behaviour-preserving for every event already in the log."""
+    triples = render_upsert_listing({
+        "ticker": "EGL", "company_gmr_id": "g1",
+    })
+    listing_of = [t for t in triples
+                  if t.p == "http://data.fontem.eu/ontology#listingOf"][0]
+    assert "/id/Company/g1" in listing_of.o
+    assert not [t for t in triples
+                if t.p == "http://data.fontem.eu/ontology#securityType"]

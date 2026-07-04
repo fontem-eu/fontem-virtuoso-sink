@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from fontem_event_schemas.integrity import contract_red_flags
+from fontem_event_schemas.securities import is_fund_security_type
 
 FONTEM = "http://data.fontem.eu/ontology#"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
@@ -348,12 +349,44 @@ def render_upsert_exchange_rate(p: dict) -> list[Triple]:
     return out
 
 
+def render_upsert_investment_fund(p: dict) -> list[Triple]:
+    """Pooled investment vehicle — a first-class entity, distinct from
+    fontem:Company. Same gmr_id namespace as companies; the sink layer
+    drops the entity's pre-fund .../id/Company/<gmr_id> subject in the
+    same SPARQL update (see _sparql_update) so replays converge."""
+    iri = f"http://data.fontem.eu/id/InvestmentFund/{p['gmr_id']}"
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}InvestmentFund"),
+               is_literal=False),
+    ]
+    if name := _lit(p.get("name"), lang="en"):
+        out.append(Triple(iri, RDFS_LABEL, name, is_literal=True))
+    if lei := _lit(p.get("lei")):
+        out.append(Triple(iri, f"{FONTEM}lei", lei, is_literal=True))
+    if country := _lit(p.get("country")):
+        out.append(Triple(iri, WDT_P17, country, is_literal=True))
+    if (active := p.get("active")) is not None:
+        out.append(Triple(iri, f"{FONTEM}active",
+                          "true" if active else "false", is_literal=True))
+    if lf := _lit(p.get("legal_form")):
+        out.append(Triple(iri, f"{FONTEM}legalForm", lf, is_literal=True))
+    if ft := _lit(p.get("fund_type")):
+        out.append(Triple(iri, f"{FONTEM}fundType", ft, is_literal=True))
+    return out
+
+
 def render_upsert_listing(p: dict) -> list[Triple]:
     iri = f"http://data.fontem.eu/id/Listing/{p['ticker']}"
-    company_iri = f"http://data.fontem.eu/id/Company/{p['company_gmr_id']}"
+    # Fund units belong to an InvestmentFund entity, company equity to
+    # a Company — same gmr_id either way; the granular security_type
+    # decides which subject the listingOf edge points at.
+    owner = ("InvestmentFund"
+             if is_fund_security_type(p.get("security_type"))
+             else "Company")
+    company_iri = f"http://data.fontem.eu/id/{owner}/{p['company_gmr_id']}"
     out: list[Triple] = [
         Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Listing")),
-        # The Listing → Company linkage. Using fontem:listingOf so the
+        # The Listing → owner linkage. Using fontem:listingOf so the
         # inverse fontem:hasListing falls out via OWL2-RL closure.
         Triple(iri, f"{FONTEM}listingOf", _iri(company_iri)),
         Triple(iri, f"{FONTEM}ticker",
@@ -370,6 +403,9 @@ def render_upsert_listing(p: dict) -> list[Triple]:
         out.append(Triple(iri, f"{FONTEM}isin", isin, is_literal=True))
     if mic := _lit(p.get("mic")):
         out.append(Triple(iri, f"{FONTEM}mic", mic, is_literal=True))
+    if st := _lit(p.get("security_type")):
+        out.append(Triple(iri, f"{FONTEM}securityType", st,
+                          is_literal=True))
     return out
 
 
@@ -512,6 +548,7 @@ RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
     "BeginGraphReplace": None,
     "EndGraphReplace": None,
     "UpsertCompany": render_upsert_company,
+    "UpsertInvestmentFund": render_upsert_investment_fund,
     "UpsertListing": render_upsert_listing,
     "UpsertSanctionedEntity": render_upsert_sanctioned_entity,
     "UpsertFiling": render_upsert_filing,

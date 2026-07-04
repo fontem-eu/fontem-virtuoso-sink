@@ -195,6 +195,21 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         _safe = "%:/?#[]@!$&\'()*+,;=._-~"
         s_iri = quote(ev.iri, safe=_safe)
         g_iri = quote(graph_iri, safe=_safe)
+        extra_cleanup = ""
+        if ev.event_type == "UpsertInvestmentFund":
+            # The entity's pre-fund life as .../id/Company/<gmr_id>
+            # must not linger as a stale subject — drop it in the same
+            # update so full replays converge to the same store.
+            gmr = ev.payload.get("gmr_id")
+            if gmr:
+                comp_iri = quote(
+                    f"http://data.fontem.eu/id/Company/{gmr}", safe=_safe)
+                comp_g = quote(
+                    self._domain_default_graph("company"), safe=_safe)
+                extra_cleanup = (
+                    f"DELETE WHERE {{ GRAPH <{comp_g}> "
+                    f"{{ <{comp_iri}> ?p ?o }} }} ; "
+                )
         if ev.op == "delete":
             update = (
                 f"DELETE WHERE {{ GRAPH <{g_iri}> "
@@ -205,7 +220,8 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
             # the new triples. Within one transaction.
             triples_ttl = to_turtle(triples).rstrip()
             update = (
-                f"DELETE WHERE {{ GRAPH <{g_iri}> "
+                extra_cleanup
+                + f"DELETE WHERE {{ GRAPH <{g_iri}> "
                 f"{{ <{s_iri}> ?p ?o }} }} ; "
                 f"INSERT DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
             )
