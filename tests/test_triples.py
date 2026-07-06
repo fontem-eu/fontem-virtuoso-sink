@@ -420,3 +420,15 @@ def test_listing_without_security_type_defaults_to_company():
     assert "/id/Company/g1" in listing_of.o
     assert not [t for t in triples
                 if t.p == "http://data.fontem.eu/ontology#securityType"]
+
+
+def test_contract_quarantine_renders_marker_not_values():
+    triples = render_upsert_contract({
+        "ted_notice_id": "n-1",
+        "value_quarantined": True,
+        "value_quarantine_reason": "implausible_magnitude",
+    })
+    preds = {t.p.split("#")[-1] for t in triples}
+    assert "valueQuarantined" in preds
+    assert "valueQuarantineReason" in preds
+    assert "valueEur" not in preds     # event omits values; none rendered

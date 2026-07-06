@@ -487,6 +487,15 @@ def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many
         out.append(Triple(iri, f"{FONTEM}publicationDate",
                           f'"{pd}"^^<{XSD_DATE}>', is_literal=True))
     out.extend(_contract_value_triples(iri, p))
+    # Value quarantine: when the platform withheld the monetary fields
+    # (bad published data), say so — the subject-replace upsert already
+    # dropped the old value triples because the event omits them.
+    if p.get("value_quarantined"):
+        out.append(Triple(iri, f"{FONTEM}valueQuarantined", "true",
+                          is_literal=True))
+        if reason := _lit(p.get("value_quarantine_reason")):
+            out.append(Triple(iri, f"{FONTEM}valueQuarantineReason",
+                              reason, is_literal=True))
     if cpv := _lit(p.get("cpv")):
         out.append(Triple(iri, f"{FONTEM}cpv", cpv, is_literal=True))
     if nuts := _lit(p.get("nuts")):
