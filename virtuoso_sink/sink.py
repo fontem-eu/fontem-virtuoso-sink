@@ -45,6 +45,24 @@ logger = logging.getLogger(__name__)
 _BIG_DATA_CONST_OVERRIDE = "define sql:big-data-const 1\n"
 
 
+def _stale_entity_subject(ev) -> "str | None":
+    """The opposite-label subject IRI to drop so a Company/InvestmentFund
+    relabel converges (an entity has exactly one subject). Returns None
+    when the event doesn't move a label."""
+    gmr = ev.payload.get("gmr_id")
+    if not gmr:
+        return None
+    if ev.event_type == "UpsertInvestmentFund":
+        return f"http://data.fontem.eu/id/Company/{gmr}"
+    if ev.event_type == "UpsertCompany" and ev.payload.get("entity_kind"):
+        # GENERAL reverts a fund -> drop the InvestmentFund subject.
+        # FUND is rendered at the InvestmentFund subject while ev.iri is
+        # still Company (dropped by the main DELETE); we also refresh the
+        # InvestmentFund subject cleanly first -> same stale target.
+        return f"http://data.fontem.eu/id/InvestmentFund/{gmr}"
+    return None
+
+
 class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attributes
     """Subclass of the gmr-events EventConsumer base class.
 
@@ -196,20 +214,21 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         s_iri = quote(ev.iri, safe=_safe)
         g_iri = quote(graph_iri, safe=_safe)
         extra_cleanup = ""
-        if ev.event_type == "UpsertInvestmentFund":
-            # The entity's pre-fund life as .../id/Company/<gmr_id>
-            # must not linger as a stale subject — drop it in the same
-            # update so full replays converge to the same store.
-            gmr = ev.payload.get("gmr_id")
-            if gmr:
-                comp_iri = quote(
-                    f"http://data.fontem.eu/id/Company/{gmr}", safe=_safe)
-                comp_g = quote(
-                    self._domain_default_graph("company"), safe=_safe)
-                extra_cleanup = (
-                    f"DELETE WHERE {{ GRAPH <{comp_g}> "
-                    f"{{ <{comp_iri}> ?p ?o }} }} ; "
-                )
+        # Relabel convergence: an entity has ONE subject IRI, chosen from
+        # its label. When the label changes (or on any UpsertCompany that
+        # states a kind), drop the opposite subject in the same update so
+        # replays and reverts converge. UpsertInvestmentFund is emitted at
+        # the InvestmentFund subject -> drop Company; an UpsertCompany that
+        # states entity_kind is emitted at whichever subject the renderer
+        # chose (ev.iri, already DELETE'd below) -> drop InvestmentFund.
+        stale_iri = _stale_entity_subject(ev)
+        if stale_iri:
+            stale_q = quote(stale_iri, safe=_safe)
+            comp_g = quote(self._domain_default_graph("company"), safe=_safe)
+            extra_cleanup = (
+                f"DELETE WHERE {{ GRAPH <{comp_g}> "
+                f"{{ <{stale_q}> ?p ?o }} }} ; "
+            )
         if ev.op == "delete":
             update = (
                 f"DELETE WHERE {{ GRAPH <{g_iri}> "

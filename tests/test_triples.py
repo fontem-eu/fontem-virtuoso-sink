@@ -432,3 +432,37 @@ def test_contract_quarantine_renders_marker_not_values():
     assert "valueQuarantined" in preds
     assert "valueQuarantineReason" in preds
     assert "valueEur" not in preds     # event omits values; none rendered
+
+
+# ── GLEIF identity block + entity_kind subject routing ────────────
+
+
+def test_company_renders_identity_block_at_company_subject():
+    triples = render_upsert_company({
+        "gmr_id": "g1", "name": "CARLSBERG A/S", "country": "DNK",
+        "entity_kind": "GENERAL", "registered_as": "61056416",
+        "registered_at": "RA000170", "jurisdiction": "DK",
+        "aliases": ["Carlsberg Group", "Carlsberg Breweries"],
+    })
+    subj = "http://data.fontem.eu/id/Company/g1"
+    assert all(t.s == subj for t in triples)
+    by = {t.p.split("#")[-1]: t.o for t in triples}
+    assert "GENERAL" in by["entityKind"]
+    assert "61056416" in by["registeredAs"]
+    aliases = [t.o for t in triples if t.p.endswith("#alias")]
+    assert len(aliases) == 2
+
+
+def test_company_fund_kind_routes_to_investmentfund_subject():
+    triples = render_upsert_company({
+        "gmr_id": "f1", "name": "A UCITS Fund", "entity_kind": "FUND",
+    })
+    subj = "http://data.fontem.eu/id/InvestmentFund/f1"
+    assert all(t.s == subj for t in triples)
+    rdf_type = [t for t in triples if t.p.endswith("#type")][0]
+    assert "InvestmentFund" in rdf_type.o
+
+
+def test_company_no_kind_stays_company():
+    triples = render_upsert_company({"gmr_id": "e1", "name": "Edgar Co"})
+    assert all(t.s == "http://data.fontem.eu/id/Company/e1" for t in triples)

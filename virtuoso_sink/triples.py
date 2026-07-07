@@ -114,28 +114,49 @@ def _decimal(value) -> str | None:
 
 # ── renderers ────────────────────────────────────────────────────
 
-def render_upsert_company(p: dict) -> list[Triple]:
-    iri = f"http://data.fontem.eu/id/Company/{p['gmr_id']}"
+def company_subject_label(p: dict) -> str:
+    """Subject label from GLEIF entity_kind: FUND -> InvestmentFund,
+    anything else (or absent) -> Company. Single source of truth shared
+    with the sink's stale-subject cleanup."""
+    return "InvestmentFund" if p.get("entity_kind") == "FUND" else "Company"
+
+
+def render_upsert_company(p: dict) -> list[Triple]:  # pylint: disable=too-many-branches
+    # entity_kind (GLEIF category) decides the subject + rdf:type; the
+    # sink drops the opposite subject in the same update so replays and
+    # relabels converge.
+    label = company_subject_label(p)
+    iri = f"http://data.fontem.eu/id/{label}/{p['gmr_id']}"
     out: list[Triple] = [
-        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Company"), is_literal=False),
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}{label}"), is_literal=False),
     ]
     if name := _lit(p.get("name"), lang="en"):
         out.append(Triple(iri, RDFS_LABEL, name, is_literal=True))
-    if lei := _lit(p.get("lei")):
-        out.append(Triple(iri, f"{FONTEM}lei", lei, is_literal=True))
-    if vat := _lit(p.get("vat")):
-        out.append(Triple(iri, f"{FONTEM}vat", vat, is_literal=True))
-    if cik := _lit(p.get("cik")):
-        out.append(Triple(iri, f"{FONTEM}cik", cik, is_literal=True))
+    for key, pred in (("lei", "lei"), ("vat", "vat"), ("cik", "cik"),
+                      ("legal_form", "legalForm"),
+                      ("postal_code", "postalCode"),
+                      ("entity_kind", "entityKind"),
+                      ("registered_as", "registeredAs"),
+                      ("registered_at", "registeredAt"),
+                      ("jurisdiction", "jurisdiction"),
+                      ("registration_status", "registrationStatus"),
+                      ("entity_creation_date", "entityCreationDate"),
+                      ("address", "address"), ("city", "city"),
+                      ("region", "region"), ("hq_address", "hqAddress"),
+                      ("hq_city", "hqCity"), ("hq_region", "hqRegion"),
+                      ("hq_postal_code", "hqPostalCode")):
+        if v := _lit(p.get(key)):
+            out.append(Triple(iri, f"{FONTEM}{pred}", v, is_literal=True))
     if country := _lit(p.get("country")):
         out.append(Triple(iri, WDT_P17, country, is_literal=True))
+    if hq_country := _lit(p.get("hq_country")):
+        out.append(Triple(iri, f"{FONTEM}hqCountry", hq_country, is_literal=True))
     if (active := p.get("active")) is not None:
         out.append(Triple(iri, f"{FONTEM}active",
                           "true" if active else "false", is_literal=True))
-    if lf := _lit(p.get("legal_form")):
-        out.append(Triple(iri, f"{FONTEM}legalForm", lf, is_literal=True))
-    if pc := _lit(p.get("postal_code")):
-        out.append(Triple(iri, f"{FONTEM}postalCode", pc, is_literal=True))
+    for alias in (p.get("aliases") or []):
+        if a := _lit(alias):
+            out.append(Triple(iri, f"{FONTEM}alias", a, is_literal=True))
     return out
 
 
