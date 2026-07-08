@@ -261,4 +261,16 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # Convention: domain → graph IRI. Override in producers
         # by emitting a Begin/End bracket; this is the fallback
         # for non-bracketed (per-entity) events.
+        #
+        # Company and InvestmentFund are ONE corporate identity space:
+        # the subtype lives in the subject IRI (.../id/Company/<gmr> vs
+        # .../id/InvestmentFund/<gmr>), not the graph. The retired "fund"
+        # domain (legacy UpsertInvestmentFund, #270 dropped the producer)
+        # therefore routes to the company graph too, so a relabel — and a
+        # full replay of those historical fund events — converges to a
+        # single subject in a single graph instead of leaving a stale twin
+        # in graph/fund. The stale-subject cleanup already targets the
+        # company graph, so both directions stay convergent. (#270)
+        if domain == "fund":
+            domain = "company"
         return f"http://data.fontem.eu/graph/{domain}"

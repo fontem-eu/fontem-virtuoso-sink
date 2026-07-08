@@ -101,3 +101,35 @@ def test_update_post_targets_sparql_auth_endpoint(sink_env):  # pylint: disable=
         [Triple("http://x/a", "http://x/p", '"v"')],
     )
     assert sink._client.post.call_args.args[0] == "http://virtuoso.test:8890/sparql-auth"
+
+
+def test_domain_default_graph_unifies_fund_into_company():
+    """Company and InvestmentFund share ONE corporate graph — the subtype
+    is in the subject IRI, not the graph. The retired 'fund' domain must
+    resolve to the same graph as 'company' so relabels/replays converge
+    (#270)."""
+    from virtuoso_sink.sink import VirtuosoSink
+    company = VirtuosoSink._domain_default_graph("company")
+    assert VirtuosoSink._domain_default_graph("fund") == company
+    assert company == "http://data.fontem.eu/graph/company"
+    # unrelated domains are unaffected
+    assert VirtuosoSink._domain_default_graph("contract") == \
+        "http://data.fontem.eu/graph/contract"
+
+
+def test_fund_domain_event_writes_to_company_graph(sink_env):  # pylint: disable=unused-argument
+    """A legacy UpsertInvestmentFund (domain='fund') must land in the
+    company graph, never graph/fund — otherwise a replayed fund event
+    leaves a stale twin the company-graph relabel can't reach (#270)."""
+    sink = _make_sink()
+    from virtuoso_sink.triples import Triple
+    ev = _ev("insert",
+             iri="http://data.fontem.eu/id/InvestmentFund/f1", domain="fund")
+    ev.event_type = "UpsertInvestmentFund"
+    ev.payload = {"gmr_id": "f1"}
+    sink._sparql_update(ev, [Triple(
+        "http://data.fontem.eu/id/InvestmentFund/f1",
+        "http://www.w3.org/2000/01/rdf-schema#label", '"A Fund"')])
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert "graph/company" in body
+    assert "graph/fund" not in body
