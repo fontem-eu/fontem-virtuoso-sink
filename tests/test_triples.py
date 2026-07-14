@@ -469,8 +469,6 @@ def test_company_no_kind_stays_company():
 
 
 def test_sanctioned_entity_subject_type():
-    from virtuoso_sink.triples import render_upsert_sanctioned_entity
-
     person = render_upsert_sanctioned_entity({
         "entity_id": "p-1", "eu_reference": "EU.1", "subject_type": "person",
     })
