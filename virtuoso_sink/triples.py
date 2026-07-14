@@ -179,6 +179,9 @@ def render_upsert_sanctioned_entity(p: dict) -> list[Triple]:
         out.append(Triple(iri, f"{FONTEM}sanctionRegime", reg, is_literal=True))
     if lb := _lit(p.get("legal_basis")):
         out.append(Triple(iri, f"{FONTEM}legalBasis", lb, is_literal=True))
+    # person|entity; absent on pre-2026-07-14 events (all entities then)
+    if st := _lit(p.get("subject_type")):
+        out.append(Triple(iri, f"{FONTEM}subjectType", st, is_literal=True))
     if lr := _lit(p.get("listing_reason")):
         out.append(Triple(iri, f"{FONTEM}listingReason", lr, is_literal=True))
     return out

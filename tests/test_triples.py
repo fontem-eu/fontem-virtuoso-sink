@@ -466,3 +466,18 @@ def test_company_fund_kind_routes_to_investmentfund_subject():
 def test_company_no_kind_stays_company():
     triples = render_upsert_company({"gmr_id": "e1", "name": "Edgar Co"})
     assert all(t.s == "http://data.fontem.eu/id/Company/e1" for t in triples)
+
+
+def test_sanctioned_entity_subject_type():
+    from virtuoso_sink.triples import render_upsert_sanctioned_entity
+
+    person = render_upsert_sanctioned_entity({
+        "entity_id": "p-1", "eu_reference": "EU.1", "subject_type": "person",
+    })
+    assert any("subjectType" in t.p and "person" in t.o for t in person)
+
+    # absent subject_type (pre-2026-07-14 events) emits no such triple
+    silent = render_upsert_sanctioned_entity({
+        "entity_id": "e-1", "eu_reference": "EU.2",
+    })
+    assert not any("subjectType" in t.p for t in silent)
