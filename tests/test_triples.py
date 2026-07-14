@@ -7,7 +7,8 @@ from virtuoso_sink.triples import (
     render_upsert_company, render_upsert_contract,
     render_upsert_disclosure, render_upsert_exchange_rate,
     render_upsert_filing, render_upsert_listing,
-    render_upsert_relationship, render_upsert_sanctioned_entity,
+    render_upsert_petition, render_upsert_relationship,
+    render_upsert_sanctioned_entity,
     render_upsert_taxonomy_code, to_turtle,
 )
 
@@ -222,7 +223,7 @@ def test_renderer_registry_covers_all_event_types() -> None:
     expected = {
         "BeginGraphReplace", "EndGraphReplace",
         "UpsertCompany", "UpsertInvestmentFund", "UpsertListing",
-        "UpsertSanctionedEntity", "UpsertFiling",
+        "UpsertPetition", "UpsertSanctionedEntity", "UpsertFiling",
         "UpsertAuthority", "UpsertContract",
         "UpsertTaxonomyCode", "UpsertRelationship",
         "UpsertDisclosure", "UpsertExchangeRate",
@@ -479,3 +480,17 @@ def test_sanctioned_entity_subject_type():
         "entity_id": "e-1", "eu_reference": "EU.2",
     })
     assert not any("subjectType" in t.p for t in silent)
+
+
+def test_petition_triples():
+    triples = render_upsert_petition({
+        "system": "eu-eci", "petition_id": "ECI(2024)000007",
+        "title": "Stop Destroying Videogames", "status": "ANSWERED",
+        "total_supporters": 1294188,
+        "organizer_names": ["Daniel ONDRUSKA"],
+        "answer_refs": ["C(2026)4110"],
+    })
+    assert any("EuEciPetition/ECI(2024)000007" in t.s for t in triples)
+    assert any("totalSupporters" in t.p and "1294188" in t.o for t in triples)
+    assert any("organizerName" in t.p for t in triples)
+    assert any("answerRef" in t.p for t in triples)

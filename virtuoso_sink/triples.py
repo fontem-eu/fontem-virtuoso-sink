@@ -575,6 +575,43 @@ def _contract_integrity_triples(iri: str, p: dict) -> list[Triple]:  # pylint: d
     return out
 
 
+
+def render_upsert_petition(p: dict) -> list[Triple]:
+    """Public petition entry (e.g. the EU Citizens\u2019 Initiative
+    register). IRI is per-system, mirroring the Disclosure convention."""
+    sys_camel = p["system"].replace("-", "_").title().replace("_", "")
+    iri = f"http://data.fontem.eu/id/{sys_camel}Petition/{p['petition_id']}"
+    out: list[Triple] = [
+        Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Petition")),
+        Triple(iri, f"{FONTEM}system", _lit(p["system"]) or '""', is_literal=True),
+        Triple(iri, f"{FONTEM}petitionId",
+               _lit(p["petition_id"]) or '""', is_literal=True),
+    ]
+    if title := _lit(p.get("title"), lang="en"):
+        out.append(Triple(iri, RDFS_LABEL, title, is_literal=True))
+    for key, pred in (
+        ("status", "status"), ("registration_date", "registrationDate"),
+        ("answered_date", "answeredDate"),
+        ("registration_decision_celex", "registrationDecisionCelex"),
+        ("support_link", "supportLink"),
+    ):
+        if v := _lit(p.get(key)):
+            out.append(Triple(iri, f"{FONTEM}{pred}", v, is_literal=True))
+    if (n := p.get("total_supporters")) is not None:
+        out.append(Triple(
+            iri, f"{FONTEM}totalSupporters",
+            f'"{int(n)}"^^<http://www.w3.org/2001/XMLSchema#integer>',
+            is_literal=True,
+        ))
+    for name in p.get("organizer_names") or ():
+        if v := _lit(name):
+            out.append(Triple(iri, f"{FONTEM}organizerName", v, is_literal=True))
+    for ref in p.get("answer_refs") or ():
+        if v := _lit(ref):
+            out.append(Triple(iri, f"{FONTEM}answerRef", v, is_literal=True))
+    return out
+
+
 # Renderer registry. None = control event; sink doesn't render
 # triples but uses the event for structural decisions.
 RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
@@ -583,6 +620,7 @@ RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
     "UpsertCompany": render_upsert_company,
     "UpsertInvestmentFund": render_upsert_investment_fund,
     "UpsertListing": render_upsert_listing,
+    "UpsertPetition": render_upsert_petition,
     "UpsertSanctionedEntity": render_upsert_sanctioned_entity,
     "UpsertFiling": render_upsert_filing,
     "UpsertAuthority": render_upsert_authority,
