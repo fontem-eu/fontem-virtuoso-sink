@@ -494,3 +494,30 @@ def test_petition_triples():
     assert any("totalSupporters" in t.p and "1294188" in t.o for t in triples)
     assert any("organizerName" in t.p for t in triples)
     assert any("answerRef" in t.p for t in triples)
+
+
+def test_contract_rollup_partial_is_skipped_not_wiped() -> None:
+    """This sink upserts by full per-subject wipe+replace, so a
+    collapse_modifications rollup-only UpsertContract (which carries no real
+    contract triples) must render nothing — the sink's handle() then drops it
+    without deleting the contract's existing triples. RDF current_value needs
+    a dedicated additive path (follow-up); skipping is the safe interim."""
+    out = render_upsert_contract({
+        "ted_notice_id": "2025-OJS111-000001",
+        "current_value": 42.0,
+        "is_current": False,
+        "contract_key": "proc:P-1",
+    })
+    assert not out  # rollup-only payload is skipped (empty render)
+
+
+def test_full_contract_still_renders_with_rollup_fields_present() -> None:
+    """A real contract emit is unaffected by the rollup guard."""
+    out = render_upsert_contract({
+        "ted_notice_id": "2025-OJS111-000002",
+        "title": "Bridge works",
+        "value_eur": 100.0,
+        "company_gmr_id": "c-1",
+    })
+    assert any("awardedTo" in str(t) for t in out)
+    assert any("valueEur" in str(t) for t in out)

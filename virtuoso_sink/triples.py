@@ -488,11 +488,26 @@ def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
     return out
 
 
+# Keys a collapse_modifications value-rollup UpsertContract carries. This sink
+# upserts by full per-subject wipe+replace (DELETE <iri> ?p ?o ; INSERT ...),
+# so rendering a rollup-only partial here would DELETE the contract's real
+# triples and re-insert only the rollup fields. RDF current_value therefore
+# needs a dedicated additive-predicate update path (tracked follow-up); until
+# then we skip rollup-only events so they never corrupt the RDF contract. The
+# Neo4j sink (additive SET n += props) already materialises the rollup, and
+# every contract-value aggregation in the API reads Neo4j, not this store.
+_ROLLUP_ONLY_KEYS = {"ted_notice_id", "current_value", "is_current", "contract_key"}
+
+
 def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many-locals
     # The contract has ~15 schema-defined optional fields (value,
     # currency, dates, authority/company IRIs, CPV, NUTS, lot info)
     # that map 1:1 to local vars used to conditionally emit triples.
     # Splitting just shuffles the same locals across helpers.
+    if set(p).issubset(_ROLLUP_ONLY_KEYS) and p.keys() != {"ted_notice_id"}:
+        # Rollup-only value-collapse partial — skip (see note above). Returning
+        # [] makes the sink's handle() drop the event without a wipe.
+        return []
     iri = f"http://data.fontem.eu/id/Contract/{p['ted_notice_id']}"
     out: list[Triple] = [
         Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Contract")),
