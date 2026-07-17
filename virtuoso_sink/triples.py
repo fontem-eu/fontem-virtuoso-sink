@@ -490,13 +490,113 @@ def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
 
 # Keys a collapse_modifications value-rollup UpsertContract carries. This sink
 # upserts by full per-subject wipe+replace (DELETE <iri> ?p ?o ; INSERT ...),
-# so rendering a rollup-only partial here would DELETE the contract's real
+# so rendering a rollup-only partial here would DELETE the subject's real
 # triples and re-insert only the rollup fields. RDF current_value therefore
 # needs a dedicated additive-predicate update path (tracked follow-up); until
 # then we skip rollup-only events so they never corrupt the RDF contract. The
 # Neo4j sink (additive SET n += props) already materialises the rollup, and
 # every contract-value aggregation in the API reads Neo4j, not this store.
+#
+# The guard also protects the notice-grain path: a rollup partial carries
+# contract_key, so without the early return it would route to the notice-grain
+# renderer, whose sink-side wipe targets the Notice subject — the wipe would
+# destroy the notice's real triples and re-insert nothing but identity.
+# Returning [] (rather than "just the monotone Contract-identity triples") is
+# deliberate: any non-empty render makes the sink run its DELETE-then-INSERT
+# update, and the DELETE half is what must not happen here. The identity
+# triples are guaranteed to exist already — the full notice event that
+# established contract_key inserted them.
 _ROLLUP_ONLY_KEYS = {"ted_notice_id", "current_value", "is_current", "contract_key"}
+
+
+def contract_notice_subject(p: dict) -> str | None:
+    """The wipe-and-replace subject for a notice-grain (contract_key)
+    UpsertContract: the Notice subject, keyed by ted_notice_id. Returns
+    None for legacy notice-id-keyed contract events, which keep ev.iri.
+    Single source of truth shared with the sink's replace-subject
+    override (mirrors company_subject_label)."""
+    if p.get("contract_key") and p.get("ted_notice_id"):
+        return f"http://data.fontem.eu/id/Notice/{p['ted_notice_id']}"
+    return None
+
+
+def _contract_party_triples(iri: str, p: dict) -> list[Triple]:
+    """parties[] → per-role Company edges on the NOTICE subject.
+    Deliberately flat: fontem:winner / fontem:namedTenderer only. Rank /
+    consortium structure would need blank-node reification, and blank
+    nodes under per-subject wipe-and-replace become orphan garbage (the
+    DELETE only matches the named subject), so we don't emit them."""
+    role_preds = {"winner": f"{FONTEM}winner",
+                  "named_tenderer": f"{FONTEM}namedTenderer"}
+    out: list[Triple] = []
+    for party in p.get("parties") or ():
+        pred = role_preds.get(party.get("role"))
+        cid = party.get("company_gmr_id")
+        if pred and cid:
+            c_iri = f"http://data.fontem.eu/id/Company/{cid}"
+            out.append(Triple(iri, pred, _iri(c_iri)))
+    return out
+
+
+def _render_contract_notice_grain(p: dict) -> list[Triple]:
+    """Notice-grain rendering for the new Contract/Notice event shape.
+
+    One event == one notice, so the event's wipe-and-replace identity is
+    the NOTICE subject (.../Notice/<ted_notice_id>): it carries every
+    per-notice literal and edge. The underlying contract aggregates MANY
+    notices and therefore CANNOT be built incrementally under
+    wipe-and-replace — each arriving notice would wipe the other
+    notices' contributions. The .../Contract/<contract_key> subject is a
+    node reference from the notice side (fontem:noticeOf) plus a minimal
+    monotone identity set (rdf:type + fontem:contractKey) that the sink
+    only ever INSERTs, never DELETEs — idempotent because identical
+    triples are set-semantics in RDF. Mutable per-contract aggregates
+    (current value etc.) intentionally stay OFF the Contract subject;
+    consumers aggregate by traversing noticeOf in SPARQL."""
+    notice_iri = contract_notice_subject(p)
+    contract_iri = f"http://data.fontem.eu/id/Contract/{p['contract_key']}"
+    out: list[Triple] = [
+        Triple(notice_iri, RDF_TYPE, _iri(f"{FONTEM}Notice")),
+        Triple(notice_iri, f"{FONTEM}tedNoticeId",
+               _lit(p["ted_notice_id"]) or '""', is_literal=True),
+        Triple(notice_iri, f"{FONTEM}noticeOf", _iri(contract_iri)),
+    ]
+    if nk := _lit(p.get("notice_kind")):
+        out.append(Triple(notice_iri, f"{FONTEM}noticeKind", nk,
+                          is_literal=True))
+    if title := _lit(p.get("title"), lang="en"):
+        out.append(Triple(notice_iri, RDFS_LABEL, title, is_literal=True))
+    if aid := p.get("authority_id"):
+        a_iri = f"http://data.fontem.eu/id/Authority/{aid}"
+        out.append(Triple(notice_iri, f"{FONTEM}awardedBy", _iri(a_iri)))
+    if cid := p.get("company_gmr_id"):
+        c_iri = f"http://data.fontem.eu/id/Company/{cid}"
+        out.append(Triple(notice_iri, f"{FONTEM}awardedTo", _iri(c_iri)))
+    out.extend(_contract_party_triples(notice_iri, p))
+    if pd := (p.get("publication_date") or "").strip()[:10]:
+        out.append(Triple(notice_iri, f"{FONTEM}publicationDate",
+                          f'"{pd}"^^<{XSD_DATE}>', is_literal=True))
+    out.extend(_contract_value_triples(notice_iri, p))
+    if p.get("value_quarantined"):
+        out.append(Triple(notice_iri, f"{FONTEM}valueQuarantined", "true",
+                          is_literal=True))
+        if reason := _lit(p.get("value_quarantine_reason")):
+            out.append(Triple(notice_iri, f"{FONTEM}valueQuarantineReason",
+                              reason, is_literal=True))
+    for key, pred in (("cpv", "cpv"), ("nuts", "nuts"),
+                      ("language", "language")):
+        if v := _lit(p.get(key)):
+            out.append(Triple(notice_iri, f"{FONTEM}{pred}", v,
+                              is_literal=True))
+    out.extend(_contract_integrity_triples(notice_iri, p))
+    # Monotone Contract-identity triples — the ONLY triples this sink
+    # ever emits at the Contract subject. They ride in the same INSERT
+    # DATA as the notice triples but are outside the DELETE's scope
+    # (the sink's wipe targets the Notice subject only).
+    out.append(Triple(contract_iri, RDF_TYPE, _iri(f"{FONTEM}Contract")))
+    out.append(Triple(contract_iri, f"{FONTEM}contractKey",
+                      _lit(p["contract_key"]) or '""', is_literal=True))
+    return out
 
 
 def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many-locals
@@ -508,6 +608,13 @@ def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many
         # Rollup-only value-collapse partial — skip (see note above). Returning
         # [] makes the sink's handle() drop the event without a wipe.
         return []
+    if contract_notice_subject(p):
+        # New Contract/Notice grain: contract_key present → render at the
+        # Notice subject. Events without contract_key (the entire log
+        # before the collapse_modifications regrain) keep the legacy
+        # Contract/<ted_notice_id> rendering below, byte-for-byte, so a
+        # replay from seq 0 is stable.
+        return _render_contract_notice_grain(p)
     iri = f"http://data.fontem.eu/id/Contract/{p['ted_notice_id']}"
     out: list[Triple] = [
         Triple(iri, RDF_TYPE, _iri(f"{FONTEM}Contract")),

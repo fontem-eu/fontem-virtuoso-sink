@@ -521,3 +521,206 @@ def test_full_contract_still_renders_with_rollup_fields_present() -> None:
     })
     assert any("awardedTo" in str(t) for t in out)
     assert any("valueEur" in str(t) for t in out)
+
+
+# ── Contract/Notice grain (contract_key events) ───────────────────
+
+
+def _notice_grain_payload(**over):
+    base = {
+        "ted_notice_id": "6a1e0e87-0000-5000-8000-000000000001",
+        "contract_key": "proc:11111111-2222-5333-8444-555555555555",
+        "notice_kind": "award",
+        "title": "Bridge works",
+        "authority_id": "a-1",
+        "company_gmr_id": "c-1",
+        "publication_date": "2026-05-01",
+        "value_eur": 1000000.0,
+        "value_currency": "EUR",
+        "tenders_received": 2,
+        "parties": [
+            {"company_gmr_id": "c-1", "name": "Alpha", "role": "winner",
+             "is_consortium_member": False},
+            {"company_gmr_id": "c-2", "name": "Beta", "role": "winner",
+             "is_consortium_member": True, "tendering_party_id": "tp-1"},
+            {"company_gmr_id": "c-3", "name": "Gamma",
+             "role": "named_tenderer"},
+        ],
+    }
+    base.update(over)
+    return base
+
+
+def test_contract_notice_grain_renders_notice_subject() -> None:
+    """contract_key routes the event to the Notice subject: per-notice
+    literals + a noticeOf edge to the Contract node reference."""
+    triples = render_upsert_contract(_notice_grain_payload())
+    notice = "http://data.fontem.eu/id/Notice/6a1e0e87-0000-5000-8000-000000000001"
+    contract = ("http://data.fontem.eu/id/Contract/"
+                "proc:11111111-2222-5333-8444-555555555555")
+    f = "http://data.fontem.eu/ontology#"
+    notice_triples = [t for t in triples if t.s == notice]
+    pmap = {t.p: t.o for t in notice_triples}
+    assert pmap["http://www.w3.org/1999/02/22-rdf-syntax-ns#type"].endswith(
+        "#Notice>")
+    assert pmap[f + "noticeOf"] == f"<{contract}>"
+    assert pmap[f + "noticeKind"] == '"award"'
+    assert pmap[f + "tedNoticeId"] == '"6a1e0e87-0000-5000-8000-000000000001"'
+    # Per-notice literals live on the Notice subject, never on Contract.
+    assert f + "valueEur" in pmap
+    assert f + "publicationDate" in pmap
+    assert pmap[f + "tendersReceived"] == \
+        '"2"^^<http://www.w3.org/2001/XMLSchema#integer>'
+    assert f + "awardedBy" in pmap
+    assert f + "awardedTo" in pmap
+
+
+def test_contract_notice_grain_contract_subject_is_monotone_identity() -> None:
+    """The Contract subject carries ONLY the monotone identity set
+    (rdf:type + contractKey) — never mutable values. Everything else a
+    notice knows stays on the Notice subject, because the Contract
+    subject aggregates many notices and must survive every one of their
+    wipe-and-replace upserts."""
+    triples = render_upsert_contract(_notice_grain_payload())
+    contract = ("http://data.fontem.eu/id/Contract/"
+                "proc:11111111-2222-5333-8444-555555555555")
+    contract_triples = [t for t in triples if t.s == contract]
+    preds = {t.p for t in contract_triples}
+    assert preds == {
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "http://data.fontem.eu/ontology#contractKey",
+    }
+    pmap = {t.p: t.o for t in contract_triples}
+    assert pmap["http://www.w3.org/1999/02/22-rdf-syntax-ns#type"].endswith(
+        "#Contract>")
+    assert pmap["http://data.fontem.eu/ontology#contractKey"] == \
+        '"proc:11111111-2222-5333-8444-555555555555"'
+    # And nothing else escapes to a third subject.
+    notice = "http://data.fontem.eu/id/Notice/6a1e0e87-0000-5000-8000-000000000001"
+    assert {t.s for t in triples} == {notice, contract}
+
+
+def test_contract_notice_grain_party_roles() -> None:
+    """parties[] → fontem:winner / fontem:namedTenderer Company edges on
+    the Notice subject. Flat by design: rank / consortium structure would
+    need blank nodes, which orphan under wipe-and-replace."""
+    triples = render_upsert_contract(_notice_grain_payload())
+    f = "http://data.fontem.eu/ontology#"
+    winners = sorted(t.o for t in triples if t.p == f + "winner")
+    named = [t.o for t in triples if t.p == f + "namedTenderer"]
+    assert winners == [
+        "<http://data.fontem.eu/id/Company/c-1>",
+        "<http://data.fontem.eu/id/Company/c-2>",
+    ]
+    assert named == ["<http://data.fontem.eu/id/Company/c-3>"]
+    notice = "http://data.fontem.eu/id/Notice/6a1e0e87-0000-5000-8000-000000000001"
+    assert all(t.s == notice for t in triples
+               if t.p in (f + "winner", f + "namedTenderer"))
+    # No blank nodes anywhere in the render.
+    assert not any(t.s.startswith("_:") or t.o.startswith("_:")
+                   for t in triples)
+
+
+def test_contract_without_contract_key_is_byte_identical_to_main() -> None:
+    """Backward compat lock: an event WITHOUT contract_key renders
+    byte-for-byte what current main renders (golden snapshot generated
+    from main's renderer), so a replay from seq 0 is stable."""
+    payload = {
+        "ted_notice_id": "2022-708565",
+        "title": "Road maintenance",
+        "authority_id": "a-9",
+        "company_gmr_id": "c-9",
+        "publication_date": "2022-11-30",
+        "value_eur": 5000000.0,
+        "value_currency": "HUF",
+        "value_original": 2000000000.0,
+        "cpv": "45233141",
+        "nuts": "HU110",
+        "language": "hu",
+        "procedure_type": "open",
+        "tenders_received": 3,
+        "award_criterion_type": "meat",
+        "is_framework": False,
+        "eu_funded": True,
+        "procedure_id": "proc-1",
+        "notice_type": "can-standard",
+    }
+    s = "<http://data.fontem.eu/id/Contract/2022-708565>"
+    f = "<http://data.fontem.eu/ontology#"
+    xsd = "http://www.w3.org/2001/XMLSchema#"
+    expected = "\n".join([
+        f"{s} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> "
+        "<http://data.fontem.eu/ontology#Contract> .",
+        f'{s} {f}tedNoticeId> "2022-708565" .',
+        f'{s} <http://www.w3.org/2000/01/rdf-schema#label> "Road maintenance"@en .',
+        f"{s} {f}awardedBy> <http://data.fontem.eu/id/Authority/a-9> .",
+        f"{s} {f}awardedTo> <http://data.fontem.eu/id/Company/c-9> .",
+        f'{s} {f}publicationDate> "2022-11-30"^^<{xsd}date> .',
+        f'{s} {f}valueEur> "5000000.0"^^<{xsd}decimal> .',
+        f'{s} {f}valueCurrency> "HUF" .',
+        f'{s} {f}valueOriginal> "2000000000.0"^^<{xsd}decimal> .',
+        f'{s} {f}cpv> "45233141" .',
+        f'{s} {f}nuts> "HU110" .',
+        f'{s} {f}language> "hu" .',
+        f'{s} {f}procedureType> "open" .',
+        f'{s} {f}tendersReceived> "3"^^<{xsd}integer> .',
+        f'{s} {f}awardCriterionType> "meat" .',
+        f'{s} {f}procedureId> "proc-1" .',
+        f'{s} {f}noticeType> "can-standard" .',
+        f'{s} {f}isFramework> "false"^^<{xsd}boolean> .',
+        f'{s} {f}euFunded> "true"^^<{xsd}boolean> .',
+        f'{s} {f}isSingleBidder> "false"^^<{xsd}boolean> .',
+        f'{s} {f}isNonOpen> "false"^^<{xsd}boolean> .',
+        f'{s} {f}isNoCall> "false"^^<{xsd}boolean> .',
+        f'{s} {f}isPriceOnly> "false"^^<{xsd}boolean> .',
+        f'{s} {f}integrityRedFlags> "0"^^<{xsd}integer> .',
+    ]) + "\n"
+    assert to_turtle(render_upsert_contract(payload)) == expected
+
+
+def test_contract_notice_grain_replay_is_deterministic() -> None:
+    """Replaying the same event yields identical statements — the
+    monotone Contract triples are set-semantics idempotent and the
+    Notice triples are wipe-and-replace stable."""
+    p = _notice_grain_payload()
+    assert render_upsert_contract(p) == render_upsert_contract(p)
+
+
+def test_modification_notice_has_its_own_subject() -> None:
+    """A modification notice must NOT share (and thus never wipes) the
+    award notice's subject: different ted_notice_id → different Notice
+    IRIs, converging on the same Contract node reference."""
+    award = render_upsert_contract(_notice_grain_payload())
+    mod = render_upsert_contract(_notice_grain_payload(
+        ted_notice_id="6a1e0e87-0000-5000-8000-000000000002",
+        notice_kind="modification",
+        value_eur=1500000.0,
+    ))
+    contract = ("http://data.fontem.eu/id/Contract/"
+                "proc:11111111-2222-5333-8444-555555555555")
+    award_notice = {t.s for t in award} - {contract}
+    mod_notice = {t.s for t in mod} - {contract}
+    assert award_notice != mod_notice           # disjoint wipe scopes
+    assert len(award_notice) == len(mod_notice) == 1
+    f = "http://data.fontem.eu/ontology#"
+    # Both link to the SAME contract node.
+    assert [t.o for t in award if t.p == f + "noticeOf"] == \
+        [t.o for t in mod if t.p == f + "noticeOf"] == [f"<{contract}>"]
+
+
+def test_notice_grain_rollup_partial_still_skipped() -> None:
+    """A collapse_modifications rollup partial under the new grain
+    (contract_key present) must render NOTHING — not even the monotone
+    Contract-identity triples. Any non-empty render would make the sink
+    run its DELETE-then-INSERT update against the Notice subject and
+    destroy the notice's real triples."""
+    assert not render_upsert_contract({
+        "ted_notice_id": "6a1e0e87-0000-5000-8000-000000000001",
+        "contract_key": "proc:P-1",
+        "current_value": 1500000.0,
+        "is_current": True,
+    })
+    assert not render_upsert_contract({
+        "ted_notice_id": "6a1e0e87-0000-5000-8000-000000000001",
+        "contract_key": "proc:P-1",
+    })
