@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fontem-virtuoso-sink"
-version = "0.1.6"
+version = "0.1.7"
 description = "Virtuoso projection sink for the fontem event log."
 requires-python = ">=3.11"
 # fontem-events and fontem-event-schemas are pinned to the exact
@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 # fails the Docker build — see `vendor/CHECK_VERSIONS.md`.
 dependencies = [
     "fontem-events==0.3.0",
-    "fontem-event-schemas==0.1.0",
+    "fontem-event-schemas==0.2.0",
     "httpx>=0.28.1",
     "psycopg[binary]>=3.3.4",
     "prometheus-client>=0.21.1",

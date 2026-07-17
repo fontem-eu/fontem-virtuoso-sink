@@ -133,3 +133,55 @@ def test_fund_domain_event_writes_to_company_graph(sink_env):  # pylint: disable
     body = sink._client.post.call_args.kwargs["data"]["query"]
     assert "graph/company" in body
     assert "graph/fund" not in body
+
+
+def test_notice_grain_contract_wipes_notice_subject_not_contract(sink_env):  # pylint: disable=unused-argument
+    """A contract_key UpsertContract must DELETE the Notice subject —
+    never ev.iri's Contract subject, and never the Contract/<key> node
+    the monotone identity triples target. The Contract subject
+    aggregates many notices; wiping it from any single notice's upsert
+    would destroy the other notices' contributions."""
+    sink = _make_sink()
+    from virtuoso_sink.triples import render_upsert_contract
+
+    payload = {
+        "ted_notice_id": "n-77",
+        "contract_key": "proc:P-77",
+        "notice_kind": "award",
+        "value_eur": 10.0,
+    }
+    ev = _ev("insert",
+             iri="http://data.fontem.eu/id/Contract/n-77", domain="contract")
+    ev.event_type = "UpsertContract"
+    ev.payload = payload
+    sink._sparql_update(ev, render_upsert_contract(payload))
+
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert body.startswith("define sql:big-data-const 1\n")
+    delete_clause, insert_clause = body.split("INSERT DATA", 1)
+    # Wipe scope: the Notice subject only.
+    assert "<http://data.fontem.eu/id/Notice/n-77> ?p ?o" in delete_clause
+    assert "Contract/" not in delete_clause
+    # The Contract node reference + monotone identity ride insert-only.
+    assert "<http://data.fontem.eu/id/Contract/proc:P-77>" in insert_clause
+    assert "noticeOf" in insert_clause
+
+
+def test_legacy_contract_still_wipes_ev_iri(sink_env):  # pylint: disable=unused-argument
+    """Contracts without contract_key keep the pre-regrain behaviour:
+    the DELETE targets ev.iri (the Contract/<ted_notice_id> subject)."""
+    sink = _make_sink()
+    from virtuoso_sink.triples import render_upsert_contract
+
+    payload = {"ted_notice_id": "n-legacy", "value_eur": 5.0}
+    ev = _ev("insert",
+             iri="http://data.fontem.eu/id/Contract/n-legacy",
+             domain="contract")
+    ev.event_type = "UpsertContract"
+    ev.payload = payload
+    sink._sparql_update(ev, render_upsert_contract(payload))
+
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    delete_clause = body.split("INSERT DATA", 1)[0]
+    assert "<http://data.fontem.eu/id/Contract/n-legacy> ?p ?o" in delete_clause
+    assert "Notice/" not in body

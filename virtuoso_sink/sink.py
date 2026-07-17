@@ -24,7 +24,7 @@ import httpx
 from fontem_event_schemas import EventEnvelope
 from fontem_events import EventConsumer
 
-from .triples import RENDERERS, Triple, to_turtle
+from .triples import RENDERERS, Triple, contract_notice_subject, to_turtle
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +211,18 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # triples.py — Virtuoso doesn't fully implement RFC 3987.
         from urllib.parse import quote  # pylint: disable=import-outside-toplevel
         _safe = "%:/?#[]@!$&\'()*+,;=._-~"
-        s_iri = quote(ev.iri, safe=_safe)
+        # Notice-grain contracts (contract_key present): the event's
+        # wipe-and-replace identity is the Notice subject, not ev.iri.
+        # The renderer's monotone Contract-identity triples ride in the
+        # INSERT DATA below but are never in the DELETE's scope — the
+        # Contract subject aggregates many notices and must NOT be wiped
+        # by any single notice's upsert (each notice would destroy the
+        # other notices' contributions).
+        if ev.op != "delete" and ev.event_type == "UpsertContract":
+            s_iri = quote(contract_notice_subject(ev.payload) or ev.iri,
+                          safe=_safe)
+        else:
+            s_iri = quote(ev.iri, safe=_safe)
         g_iri = quote(graph_iri, safe=_safe)
         extra_cleanup = ""
         # Relabel convergence: an entity has ONE subject IRI, chosen from
