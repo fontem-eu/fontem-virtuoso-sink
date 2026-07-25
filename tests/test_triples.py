@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from virtuoso_sink.triples import (
     render_upsert_investment_fund,
+    render_translate_authority_name, SKOS_ALT_LABEL,
     RENDERERS, render_upsert_authority,
     render_upsert_company, render_upsert_contract,
     render_upsert_disclosure, render_upsert_exchange_rate,
@@ -217,6 +218,26 @@ def test_exchange_rate_iri_keyed_by_triple() -> None:
     assert pmap["http://data.fontem.eu/ontology#rateSource"] == '"ecb"'
 
 
+def test_translate_authority_name_renders_lang_tagged_alt_labels() -> None:
+    """Each translation becomes a skos:altLabel with its language tag on
+    the Authority subject; the source name is NOT re-asserted here."""
+    triples = render_translate_authority_name({
+        "authority_id": "a-1", "name": "Urzad Miasta",
+        "translations": {"de": "Stadtamt", "en": "City Office"},
+    })
+    subj = "http://data.fontem.eu/id/Authority/a-1"
+    assert {(t.p, t.o) for t in triples} == {
+        (SKOS_ALT_LABEL, '"Stadtamt"@de'),
+        (SKOS_ALT_LABEL, '"City Office"@en'),
+    }
+    assert all(t.s == subj and t.is_literal for t in triples)
+
+
+def test_translate_authority_name_empty_translations_is_empty() -> None:
+    assert not render_translate_authority_name(
+        {"authority_id": "a-2", "translations": {}})
+
+
 def test_renderer_registry_covers_all_event_types() -> None:
     # Sentinel: if we add a new event type without a renderer
     # entry, this test fails.
@@ -227,6 +248,7 @@ def test_renderer_registry_covers_all_event_types() -> None:
         "UpsertAuthority", "UpsertContract",
         "UpsertTaxonomyCode", "UpsertRelationship",
         "UpsertDisclosure", "UpsertExchangeRate",
+        "TranslateAuthorityName",
         "AssertSameAs",
     }
     assert set(RENDERERS) == expected

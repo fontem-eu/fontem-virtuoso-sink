@@ -89,6 +89,32 @@ def test_delete_update_prepends_big_data_const_directive(sink_env):  # pylint: d
     assert "INSERT DATA" not in body
 
 
+def test_translate_authority_name_is_scoped_replace(sink_env):  # pylint: disable=unused-argument
+    """TranslateAuthorityName must NOT wipe the whole authority subject.
+    It deletes only skos:altLabel for that subject (its own predicate),
+    then inserts — so the authority's identity/name/country triples,
+    written by UpsertAuthority, survive the enrichment."""
+    sink = _make_sink()
+    from virtuoso_sink.triples import Triple, SKOS_ALT_LABEL
+
+    ev = _ev("upsert", iri="http://data.fontem.eu/id/Authority/a-1",
+             domain="authority")
+    ev.event_type = "TranslateAuthorityName"
+    triples = [
+        Triple("http://data.fontem.eu/id/Authority/a-1", SKOS_ALT_LABEL,
+               '"Stadtamt"@de', is_literal=True),
+    ]
+    sink._sparql_update(ev, triples)
+
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert body.startswith("define sql:big-data-const 1\n"), body[:80]
+    # Scoped: the DELETE names the skos:altLabel predicate, NOT `?p ?o`.
+    assert "skos/core#altLabel> ?o" in body
+    assert "?p ?o" not in body, "must not wipe the whole subject"
+    assert "INSERT DATA" in body
+    assert '"Stadtamt"@de' in body
+
+
 def test_update_post_targets_sparql_auth_endpoint(sink_env):  # pylint: disable=unused-argument
     """The override is moot if the request lands at the wrong endpoint.
     Lock the URL down so a future refactor that swaps it silently still
