@@ -234,8 +234,8 @@ def test_translate_authority_name_renders_lang_tagged_alt_labels() -> None:
 
 
 def test_translate_authority_name_empty_translations_is_empty() -> None:
-    assert render_translate_authority_name(
-        {"authority_id": "a-2", "translations": {}}) == []
+    assert not render_translate_authority_name(
+        {"authority_id": "a-2", "translations": {}})
 
 
 def test_renderer_registry_covers_all_event_types() -> None:
