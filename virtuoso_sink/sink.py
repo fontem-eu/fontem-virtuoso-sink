@@ -24,7 +24,10 @@ import httpx
 from fontem_event_schemas import EventEnvelope
 from fontem_events import EventConsumer
 
-from .triples import RENDERERS, Triple, contract_notice_subject, to_turtle
+from .triples import (
+    RENDERERS, SCOPED_REPLACE_PREDICATES, Triple,
+    contract_notice_subject, to_turtle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,19 @@ def _stale_entity_subject(ev) -> "str | None":
         # InvestmentFund subject cleanly first -> same stale target.
         return f"http://data.fontem.eu/id/InvestmentFund/{gmr}"
     return None
+
+
+def _delete_clause(g_iri: str, s_iri: str, event_type: str) -> str:
+    """The DELETE half of an upsert UPDATE. A scoped-replace event clears
+    only its enrichment predicate(s) for the subject so the subject's
+    other triples survive; every other event wipes the whole subject."""
+    scoped = SCOPED_REPLACE_PREDICATES.get(event_type)
+    if scoped:
+        return "".join(
+            f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> <{pred}> ?o }} }} ; "
+            for pred in scoped
+        )
+    return f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> ?p ?o }} }} ; "
 
 
 class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attributes
@@ -246,14 +262,14 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 f"{{ <{s_iri}> ?p ?o }} }}"
             )
         else:
-            # Upsert: delete the existing subject, then insert
-            # the new triples. Within one transaction.
+            # Upsert: delete then insert, in one transaction. Scoped-
+            # replace events clear only their enrichment predicate(s);
+            # everything else wipes the whole subject (see _delete_clause).
             triples_ttl = to_turtle(triples).rstrip()
             update = (
                 extra_cleanup
-                + f"DELETE WHERE {{ GRAPH <{g_iri}> "
-                f"{{ <{s_iri}> ?p ?o }} }} ; "
-                f"INSERT DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
+                + _delete_clause(g_iri, s_iri, ev.event_type)
+                + f"INSERT DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
             )
         r = self._client.post(
             self._update_url,

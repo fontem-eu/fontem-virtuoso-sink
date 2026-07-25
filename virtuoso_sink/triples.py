@@ -457,6 +457,24 @@ def render_upsert_authority(p: dict) -> list[Triple]:
     return out
 
 
+def render_translate_authority_name(p: dict) -> list[Triple]:
+    """TranslateAuthorityName -> language-tagged skos:altLabel triples on
+    the Authority subject, one per translation.
+
+    This is an ADDITIVE enrichment: the sink applies it as a scoped
+    replace (see SCOPED_REPLACE_PREDICATES) that only touches
+    skos:altLabel, so the authority's identity/name/country triples
+    survive. The Authority renderer never emits skos:altLabel, so the
+    scoped delete is safe — it clears only prior translations.
+    """
+    iri = f"http://data.fontem.eu/id/Authority/{p['authority_id']}"
+    out: list[Triple] = []
+    for lang, value in (p.get("translations") or {}).items():
+        if label := _lit(value, lang=lang):
+            out.append(Triple(iri, SKOS_ALT_LABEL, label, is_literal=True))
+    return out
+
+
 def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
     """Monetary-value triples (eur / currency / original), split out of
     render_upsert_contract to keep its cognitive complexity in check."""
@@ -751,7 +769,22 @@ RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
     "UpsertRelationship": render_upsert_relationship,
     "UpsertDisclosure": render_upsert_disclosure,
     "UpsertExchangeRate": render_upsert_exchange_rate,
+    "TranslateAuthorityName": render_translate_authority_name,
     "AssertSameAs": render_assert_same_as,
+}
+
+
+# Events that ENRICH a subject rather than redefine it. The sink applies
+# these as a SCOPED replace — it deletes only the listed predicate(s)
+# for the subject and re-inserts, instead of wiping the whole subject
+# (the default Upsert semantics). Wiping would destroy the entity the
+# enrichment annotates. TranslateAuthorityName adds language-tagged
+# skos:altLabel triples to an Authority whose identity/name/country
+# triples must survive; the Authority renderer never emits
+# skos:altLabel, so clearing that predicate touches only prior
+# translations.
+SCOPED_REPLACE_PREDICATES: dict[str, tuple[str, ...]] = {
+    "TranslateAuthorityName": (SKOS_ALT_LABEL,),
 }
 
 
