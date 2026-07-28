@@ -109,6 +109,7 @@ def test_translate_authority_name_is_scoped_replace(sink_env):  # pylint: disabl
     body = sink._client.post.call_args.kwargs["data"]["query"]
     assert body.startswith("define sql:big-data-const 1\n"), body[:80]
     # Scoped: the DELETE names the skos:altLabel predicate, NOT `?p ?o`.
+    assert "graph/authority-i18n" in body   # translations routed to the i18n graph
     assert "skos/core#altLabel> ?o" in body
     assert "?p ?o" not in body, "must not wipe the whole subject"
     assert "INSERT DATA" in body

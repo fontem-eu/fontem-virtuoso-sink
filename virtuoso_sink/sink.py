@@ -221,6 +221,14 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # domain. For now we use the same name->graph convention
         # as the existing migrate script.
         graph_iri = self._domain_default_graph(ev.domain)
+        # Translations live in a SEPARATE graph from the entity itself.
+        # An UpsertAuthority wipe-and-replaces the authority subject in
+        # graph/authority; routing the machine-translated skos:altLabels
+        # to graph/authority-i18n keeps them out of that blast radius, so
+        # a re-loaded authority never loses its translations. The scoped
+        # replace below still clears only skos:altLabel within this graph.
+        if ev.event_type == "TranslateAuthorityName":
+            graph_iri = "http://data.fontem.eu/graph/authority-i18n"
         # Percent-encode the subject IRI so non-ASCII characters
         # (Greek company names, Cyrillic listings, etc.) don't crash
         # Virtuoso's SPARQL parser. Same reasoning as _iri() in
