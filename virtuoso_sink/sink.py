@@ -108,6 +108,12 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         base = self.sparql_endpoint.rstrip("/").removesuffix("/sparql")
         self._update_url = f"{base}/sparql-auth"
         self._crud_url = f"{base}/sparql-graph-crud-auth"
+        # This Accept is right for /sparql-auth, which answers in
+        # SPARQL results JSON. It is wrong for /sparql-graph-crud-auth,
+        # which answers a graph-store write with a plain status document
+        # and returns 406 rather than ignore an Accept it cannot honour.
+        # _put_replace overrides it; see the note there before removing
+        # that override.
         self._client = httpx.Client(
             timeout=self.timeout,
             auth=httpx.DigestAuth(self.dba_user, self.dba_password),
@@ -208,7 +214,15 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
             self._crud_url,
             params={"graph": graph_iri},
             content=body,
-            headers={"Content-Type": "text/turtle"},
+            # Accept must be widened here. The client-wide default asks
+            # for application/sparql-results+json, which the graph-store
+            # endpoint cannot produce for a write, so Virtuoso rejects
+            # the request with 406 before it ever looks at the body —
+            # the payload is irrelevant, a one-triple PUT fails exactly
+            # the same way. That silently broke every bracketed
+            # graph-replace: the daily sanctions replace had been
+            # failing this way on every run.
+            headers={"Content-Type": "text/turtle", "Accept": "*/*"},
         )
         r.raise_for_status()
         logger.info(
