@@ -785,6 +785,24 @@ RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
 # translations.
 SCOPED_REPLACE_PREDICATES: dict[str, tuple[str, ...]] = {
     "TranslateAuthorityName": (SKOS_ALT_LABEL,),
+    # AssertSameAs carries ONE triple about a subject that already exists
+    # and is described by its own Upsert event. Without an entry here it
+    # falls to the default branch of _delete_clause —
+    #   DELETE WHERE { GRAPH <g> { <subject> ?p ?o } }
+    # — which wipes the company's whole record and re-inserts only the
+    # owl:sameAs. Measured in prod on 2026-09-02: every subject carrying
+    # owl:sameAs had exactly 1 property where an untouched company has 7
+    # (type, label, lei, country, active, legalForm, postalCode), and
+    # 27,696 companies had been stripped within hours of the
+    # consolidator's emit being enabled.
+    #
+    # It also made the two event types fight: an UpsertCompany landing
+    # after an AssertSameAs removed the equivalence again, so only ~15%
+    # of emitted events survived as triples. Scoping to owl:sameAs lets
+    # both coexist — the upsert owns the entity's attributes, this owns
+    # its equivalences — while still replacing rather than accumulating
+    # stale sameAs for a subject whose matches have changed.
+    "AssertSameAs": (OWL_SAME_AS,),
 }
 
 
