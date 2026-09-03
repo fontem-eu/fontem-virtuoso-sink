@@ -72,7 +72,11 @@ def test_insert_update_prepends_big_data_const_directive(sink_env):  # pylint: d
     sink._client.post.assert_called_once()
     body = sink._client.post.call_args.kwargs["data"]["query"]
     assert body.startswith("define sql:big-data-const 1\n"), body[:80]
-    assert "DELETE WHERE" in body
+    # An upsert's whole-subject replace is now DELETE {...} WHERE {...},
+    # not DELETE WHERE — it filters owl:sameAs out of the delete so a
+    # different producer's equivalences survive. The delete-only path
+    # below still uses the plain form.
+    assert "DELETE {" in body
     assert "INSERT DATA" in body
 
 

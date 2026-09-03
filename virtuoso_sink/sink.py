@@ -25,7 +25,7 @@ from fontem_event_schemas import EventEnvelope
 from fontem_events import EventConsumer
 
 from .triples import (
-    RENDERERS, SCOPED_REPLACE_PREDICATES, Triple,
+    OWL_SAME_AS, RENDERERS, SCOPED_REPLACE_PREDICATES, Triple,
     contract_notice_subject, to_turtle,
 )
 
@@ -66,6 +66,12 @@ def _stale_entity_subject(ev) -> "str | None":
     return None
 
 
+# Predicates a whole-subject replace must leave alone because a different
+# event stream owns them. Keep this minimal — anything listed here stops
+# being cleaned up by the producer that writes the rest of the subject.
+_PRESERVED_ON_REPLACE: tuple[str, ...] = (OWL_SAME_AS,)
+
+
 def _delete_clause(g_iri: str, s_iri: str, event_type: str) -> str:
     """The DELETE half of an upsert UPDATE. A scoped-replace event clears
     only its enrichment predicate(s) for the subject so the subject's
@@ -76,7 +82,32 @@ def _delete_clause(g_iri: str, s_iri: str, event_type: str) -> str:
             f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> <{pred}> ?o }} }} ; "
             for pred in scoped
         )
-    return f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> ?p ?o }} }} ; "
+    # Whole-subject replace, minus the predicates another producer owns.
+    #
+    # An Upsert carries the entity's full description, so replacing the
+    # subject wholesale is right for everything the ETL asserts. It is
+    # wrong for owl:sameAs, which the consolidator asserts about the same
+    # subject from a different event stream: a plain wipe deletes an
+    # equivalence the upsert knows nothing about and was never asked to
+    # retract.
+    #
+    # That is the other half of the 2026-09-02 incident. Scoping
+    # AssertSameAs stopped it destroying company attributes, but upserts
+    # flow continuously from the ETL and kept destroying the equivalences,
+    # so only ~15% of emitted AssertSameAs survived as triples. Both
+    # directions have to be fixed or the two streams still overwrite each
+    # other, just more slowly.
+    #
+    # Staleness is still handled: AssertSameAs is itself a scoped replace,
+    # so a re-consolidation that finds fewer matches clears the subject's
+    # previous set and writes the new one. Genuine entity deletion is
+    # unaffected — ev.op == "delete" takes its own full wipe above and
+    # never reaches here.
+    preserved = " ".join(f"FILTER(?p != <{pred}>)" for pred in _PRESERVED_ON_REPLACE)
+    return (
+        f"DELETE {{ GRAPH <{g_iri}> {{ <{s_iri}> ?p ?o }} }} "
+        f"WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> ?p ?o . {preserved} }} }} ; "
+    )
 
 
 class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attributes
