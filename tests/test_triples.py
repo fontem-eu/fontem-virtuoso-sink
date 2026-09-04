@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from virtuoso_sink.triples import (
+    CURRENT_VALUE,
+    IS_CURRENT,
+    is_rollup_only,
     render_upsert_investment_fund,
     render_translate_authority_name, SKOS_ALT_LABEL,
     RENDERERS, render_upsert_authority,
@@ -518,19 +521,30 @@ def test_petition_triples():
     assert any("answerRef" in t.p for t in triples)
 
 
-def test_contract_rollup_partial_is_skipped_not_wiped() -> None:
-    """This sink upserts by full per-subject wipe+replace, so a
-    collapse_modifications rollup-only UpsertContract (which carries no real
-    contract triples) must render nothing — the sink's handle() then drops it
-    without deleting the contract's existing triples. RDF current_value needs
-    a dedicated additive path (follow-up); skipping is the safe interim."""
+def test_contract_rollup_partial_is_rendered_scoped() -> None:
+    """The collapse pass's verdict now reaches this store.
+
+    It used to render nothing, because the sink upserts by whole-subject
+    wipe and a partial would have deleted the contract to write two
+    fields. The sink scopes the replace to exactly currentValue +
+    isCurrent for a rollup payload (rollup_scoped_predicates), so the
+    partial is safe and the reader gets the collapsed figure instead of
+    falling back to raw value_eur for every modified contract.
+    """
     out = render_upsert_contract({
         "ted_notice_id": "2025-OJS111-000001",
         "current_value": 42.0,
         "is_current": False,
         "contract_key": "proc:P-1",
     })
-    assert not out  # rollup-only payload is skipped (empty render)
+    preds = {t.p for t in out}
+    assert preds == {CURRENT_VALUE, IS_CURRENT}, (
+        "a rollup must render ONLY the rollup predicates — anything else "
+        "falls outside the sink's scoped DELETE and leaks"
+    )
+    pmap = {t.p: t.o for t in out}
+    assert "42" in pmap[CURRENT_VALUE]
+    assert pmap[IS_CURRENT].startswith('"false"')
 
 
 def test_full_contract_still_renders_with_rollup_fields_present() -> None:
@@ -730,19 +744,37 @@ def test_modification_notice_has_its_own_subject() -> None:
         [t.o for t in mod if t.p == f + "noticeOf"] == [f"<{contract}>"]
 
 
-def test_notice_grain_rollup_partial_still_skipped() -> None:
-    """A collapse_modifications rollup partial under the new grain
-    (contract_key present) must render NOTHING — not even the monotone
-    Contract-identity triples. Any non-empty render would make the sink
-    run its DELETE-then-INSERT update against the Notice subject and
-    destroy the notice's real triples."""
-    assert not render_upsert_contract({
+def test_notice_grain_rollup_lands_on_the_notice_subject() -> None:
+    """Under the new grain the rollup belongs to the Notice, which is the
+    subject the sink scopes its DELETE against. Landing it anywhere else
+    would write triples outside the delete scope and accumulate stale
+    values forever."""
+    out = render_upsert_contract({
         "ted_notice_id": "6a1e0e87-0000-5000-8000-000000000001",
         "contract_key": "proc:P-1",
         "current_value": 1500000.0,
         "is_current": True,
     })
+    notice = "http://data.fontem.eu/id/Notice/6a1e0e87-0000-5000-8000-000000000001"
+    assert {t.s for t in out} == {notice}
+    assert {t.p for t in out} == {CURRENT_VALUE, IS_CURRENT}
+
+
+def test_rollup_with_no_rollup_values_renders_nothing() -> None:
+    """Identity-only partial: nothing to say, so say nothing. A non-empty
+    render here would trigger a DELETE for values the event does not
+    carry."""
     assert not render_upsert_contract({
         "ted_notice_id": "6a1e0e87-0000-5000-8000-000000000001",
         "contract_key": "proc:P-1",
+    })
+
+
+def test_a_full_contract_is_not_treated_as_a_rollup() -> None:
+    """The scope is chosen from payload CONTENT, so the boundary matters:
+    a real contract carrying current_value must still whole-subject
+    replace, or its other fields would never be cleared."""
+    assert not is_rollup_only({
+        "ted_notice_id": "x", "contract_key": "k",
+        "current_value": 1.0, "is_current": True, "value_eur": 5.0,
     })

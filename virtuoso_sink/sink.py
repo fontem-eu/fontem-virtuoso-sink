@@ -26,7 +26,7 @@ from fontem_events import EventConsumer
 
 from .triples import (
     ADDITIVE_EVENTS, OWL_SAME_AS, RENDERERS, RETRACTION_EVENTS,
-    SCOPED_REPLACE_PREDICATES, Triple,
+    SCOPED_REPLACE_PREDICATES, Triple, rollup_scoped_predicates,
     contract_notice_subject, to_turtle,
 )
 
@@ -73,10 +73,25 @@ def _stale_entity_subject(ev) -> "str | None":
 _PRESERVED_ON_REPLACE: tuple[str, ...] = (OWL_SAME_AS,)
 
 
-def _delete_clause(g_iri: str, s_iri: str, event_type: str) -> str:
+def _delete_clause(
+    g_iri: str, s_iri: str, event_type: str, payload: dict | None = None,
+) -> str:
     """The DELETE half of an upsert UPDATE. A scoped-replace event clears
     only its enrichment predicate(s) for the subject so the subject's
-    other triples survive; every other event wipes the whole subject."""
+    other triples survive; every other event wipes the whole subject.
+
+    `payload` is consulted for scopes that depend on the event's CONTENT
+    rather than its type — a contract value-collapse rollup arrives as an
+    UpsertContract exactly like a full one, and wiping the subject for it
+    would delete the contract to write two fields.
+    """
+    if payload is not None:
+        scoped = rollup_scoped_predicates(event_type, payload)
+        if scoped:
+            return "".join(
+                f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> <{pred}> ?o }} }} ; "
+                for pred in scoped
+            )
     if event_type in ADDITIVE_EVENTS:
         # Nothing is cleared: the event states one discrete fact that
         # accumulates alongside the subject's others. Deleting first is
@@ -335,7 +350,7 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
             triples_ttl = to_turtle(triples).rstrip()
             update = (
                 extra_cleanup
-                + _delete_clause(g_iri, s_iri, ev.event_type)
+                + _delete_clause(g_iri, s_iri, ev.event_type, ev.payload)
                 + f"INSERT DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
             )
         r = self._client.post(

@@ -489,9 +489,32 @@ def render_translate_authority_name(p: dict) -> list[Triple]:
     return out
 
 
+def _publication_number_triples(iri: str, p: dict) -> list[Triple]:
+    """The human-readable TED id ("295342-2026").
+
+    Without it a reader has to call the runtime lookup endpoint to build
+    a TED link — a per-row round trip on a page that lists 50 contracts.
+    Shared by both grains so neither can drift.
+    """
+    if pubnum := _lit(p.get("ted_publication_number")):
+        return [Triple(iri, f"{FONTEM}tedPublicationNumber", pubnum,
+                       is_literal=True)]
+    return []
+
+
 def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
-    """Monetary-value triples (eur / currency / original), split out of
-    render_upsert_contract to keep its cognitive complexity in check."""
+    """Monetary-value triples (eur / currency / original / quality),
+    split out of render_upsert_contract to keep its cognitive complexity
+    in check. Shared by both grains, so a field added here reaches the
+    legacy Contract subject and the Notice subject alike.
+
+    The quality fields are not decoration. A reader seeing valueEur with
+    no valueLowConfidence and no valueQualityFlag cannot tell a
+    trustworthy figure from an `implausible_magnitude` one, and will sum
+    them together — which is exactly what the Neo4j read path guards
+    against with trusted_value_sum. Projecting the value without its
+    caveat is worse than projecting neither.
+    """
     out: list[Triple] = []
     if (v_eur := p.get("value_eur")) is not None:
         v = _decimal(v_eur)
@@ -517,6 +540,39 @@ def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
             out.append(
                 Triple(iri, f"{FONTEM}valueBeforeOriginal", v, is_literal=True)
             )
+    out.extend(_contract_value_quality_triples(iri, p))
+    return out
+
+
+def _contract_value_quality_triples(iri: str, p: dict) -> list[Triple]:
+    """How much to trust the monetary value.
+
+    Booleans are emitted only when TRUE: absent means "not flagged", and
+    a `false` triple on 750k contracts is 750k triples saying nothing.
+    """
+    out: list[Triple] = []
+    if p.get("value_low_confidence"):
+        out.append(Triple(iri, f"{FONTEM}valueLowConfidence",
+                          f'"true"^^<{XSD_BOOLEAN}>', is_literal=True))
+    if p.get("value_payable_discrepancy"):
+        out.append(Triple(iri, f"{FONTEM}valuePayableDiscrepancy",
+                          f'"true"^^<{XSD_BOOLEAN}>', is_literal=True))
+    # "ok" is the overwhelmingly common value and tells a reader nothing
+    # actionable; the seven other flags are the ones worth carrying.
+    flag = _lit(p.get("value_quality_flag"))
+    if flag and flag != '"ok"':
+        out.append(Triple(iri, f"{FONTEM}valueQualityFlag", flag,
+                          is_literal=True))
+    if (conf := p.get("value_confidence")) is not None:
+        v = _decimal(conf)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}valueConfidence", v,
+                              is_literal=True))
+    if (est := p.get("estimated_value_eur")) is not None:
+        v = _decimal(est)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}estimatedValueEur", v,
+                              is_literal=True))
     return out
 
 
@@ -539,6 +595,52 @@ def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
 # triples are guaranteed to exist already — the full notice event that
 # established contract_key inserted them.
 _ROLLUP_ONLY_KEYS = {"ted_notice_id", "current_value", "is_current", "contract_key"}
+
+
+CURRENT_VALUE = f"{FONTEM}currentValue"
+IS_CURRENT = f"{FONTEM}isCurrent"
+
+
+def is_rollup_only(p: dict) -> bool:
+    """True for a value-collapse partial: it carries the rollup fields
+    and nothing else. `{"ted_notice_id"}` alone is not a rollup — it is a
+    degenerate full event and still means whole-subject replace."""
+    return set(p).issubset(_ROLLUP_ONLY_KEYS) and p.keys() != {"ted_notice_id"}
+
+
+def rollup_scoped_predicates(event_type: str, payload: dict) -> tuple[str, ...] | None:
+    """Predicates a rollup partial replaces, or None if not a rollup.
+
+    Separate from SCOPED_REPLACE_PREDICATES because that map keys on
+    event type alone, and a rollup arrives as an UpsertContract exactly
+    like a full one — the difference is in the payload.
+    """
+    if event_type == "UpsertContract" and is_rollup_only(payload):
+        return (CURRENT_VALUE, IS_CURRENT)
+    return None
+
+
+def _render_contract_rollup(p: dict) -> list[Triple]:
+    """The collapse pass's verdict for one notice: the contract's current
+    value, and whether this notice is the canonical one for it.
+
+    Without these a reader must fall back to `notice_type != 'can-modif'`
+    and the raw value_eur — which does not double-count, but does miss
+    the collapsed figure for every modified contract.
+    """
+    subject = contract_notice_subject(p) or (
+        f"http://data.fontem.eu/id/Contract/{p['ted_notice_id']}"
+    )
+    out: list[Triple] = []
+    if (cv := p.get("current_value")) is not None:
+        v = _decimal(cv)
+        if v is not None:
+            out.append(Triple(subject, CURRENT_VALUE, v, is_literal=True))
+    if (cur := p.get("is_current")) is not None:
+        out.append(Triple(subject, IS_CURRENT,
+                          f'"{str(bool(cur)).lower()}"^^<{XSD_BOOLEAN}>',
+                          is_literal=True))
+    return out
 
 
 def contract_notice_subject(p: dict) -> str | None:
@@ -605,6 +707,7 @@ def _render_contract_notice_grain(p: dict) -> list[Triple]:
         c_iri = f"http://data.fontem.eu/id/Company/{cid}"
         out.append(Triple(notice_iri, f"{FONTEM}awardedTo", _iri(c_iri)))
     out.extend(_contract_party_triples(notice_iri, p))
+    out.extend(_publication_number_triples(notice_iri, p))
     if pd := (p.get("publication_date") or "").strip()[:10]:
         out.append(Triple(notice_iri, f"{FONTEM}publicationDate",
                           f'"{pd}"^^<{XSD_DATE}>', is_literal=True))
@@ -636,10 +739,18 @@ def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many
     # currency, dates, authority/company IRIs, CPV, NUTS, lot info)
     # that map 1:1 to local vars used to conditionally emit triples.
     # Splitting just shuffles the same locals across helpers.
-    if set(p).issubset(_ROLLUP_ONLY_KEYS) and p.keys() != {"ted_notice_id"}:
-        # Rollup-only value-collapse partial — skip (see note above). Returning
-        # [] makes the sink's handle() drop the event without a wipe.
-        return []
+    if is_rollup_only(p):
+        # Value-collapse partial. Rendered, not dropped: current_value and
+        # is_current are what let a reader sum a modified contract once
+        # instead of once per restatement, and Neo4j has had them all
+        # along while this store did not.
+        #
+        # Safe now because the sink scopes the replace to exactly these
+        # predicates (see rollup_scoped_predicates). It was NOT safe
+        # before: this sink upserts by whole-subject wipe, so rendering a
+        # partial would have deleted the subject's real triples and
+        # re-inserted only the rollup.
+        return _render_contract_rollup(p)
     if contract_notice_subject(p):
         # New Contract/Notice grain: contract_key present → render at the
         # Notice subject. Events without contract_key (the entire log
@@ -661,6 +772,7 @@ def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many
     if cid := p.get("company_gmr_id"):
         c_iri = f"http://data.fontem.eu/id/Company/{cid}"
         out.append(Triple(iri, f"{FONTEM}awardedTo", _iri(c_iri)))
+    out.extend(_publication_number_triples(iri, p))
     if pd := (p.get("publication_date") or "").strip()[:10]:
         out.append(Triple(iri, f"{FONTEM}publicationDate",
                           f'"{pd}"^^<{XSD_DATE}>', is_literal=True))

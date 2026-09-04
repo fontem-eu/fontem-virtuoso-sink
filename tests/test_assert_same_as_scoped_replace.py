@@ -29,8 +29,8 @@ assertion silently clearing the others.
 from virtuoso_sink.sink import _delete_clause
 from virtuoso_sink.sink import _PRESERVED_ON_REPLACE
 from virtuoso_sink.triples import (
-    ADDITIVE_EVENTS, OWL_SAME_AS, RETRACTION_EVENTS,
-    SCOPED_REPLACE_PREDICATES, render_retract_same_as,
+    ADDITIVE_EVENTS, CURRENT_VALUE, IS_CURRENT, OWL_SAME_AS,
+    RETRACTION_EVENTS, SCOPED_REPLACE_PREDICATES, render_retract_same_as,
 )
 
 _G = "http://data.fontem.eu/graph/company"
@@ -131,3 +131,44 @@ def test_preserved_set_is_minimal():
     """Anything added here stops being cleaned up by the producer that
     writes the rest of the subject, so the list must stay deliberate."""
     assert _PRESERVED_ON_REPLACE == (OWL_SAME_AS,)
+
+
+# ── contract value-collapse rollup ────────────────────────────────
+
+
+def test_rollup_replace_is_scoped_to_the_rollup_predicates():
+    """A rollup arrives as an UpsertContract exactly like a full one —
+    the difference is in the payload, which is why the scope has to be
+    chosen from content and not from event type.
+
+    Whole-subject replace here would delete the contract to write two
+    fields. That is why the rollup used to be dropped entirely, and why
+    Neo4j has had current_value all along while this store did not.
+    """
+    payload = {
+        "ted_notice_id": "n-1", "contract_key": "k-1",
+        "current_value": 42.0, "is_current": True,
+    }
+    clause = _delete_clause(_G, _S, "UpsertContract", payload)
+    assert CURRENT_VALUE in clause
+    assert IS_CURRENT in clause
+    assert "?p ?o" not in clause, (
+        "a rollup is wiping every predicate of its subject — this deletes "
+        "the contract in order to write two fields"
+    )
+
+
+def test_a_full_contract_still_wipes_the_whole_subject():
+    """The boundary. A real contract event owns its subject's fields and
+    must clear the ones it no longer states."""
+    payload = {
+        "ted_notice_id": "n-1", "contract_key": "k-1",
+        "current_value": 42.0, "is_current": True, "value_eur": 5.0,
+    }
+    clause = _delete_clause(_G, _S, "UpsertContract", payload)
+    assert "?p ?o" in clause
+
+
+def test_payload_is_optional_for_callers_that_have_no_content_scope():
+    """_delete_clause is still callable on event type alone."""
+    assert "?p ?o" in _delete_clause(_G, _S, "UpsertCompany")
