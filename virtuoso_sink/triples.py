@@ -241,6 +241,20 @@ def render_assert_same_as(p: dict) -> list[Triple]:
     ]
 
 
+def render_retract_same_as(p: dict) -> list[Triple]:
+    """Triples to DELETE, not insert — see RETRACTION_EVENTS.
+
+    Both directions are emitted. owl:sameAs is symmetric, and which
+    direction was originally written depends on which side the
+    consolidator happened to treat as the source; a retraction that
+    removed only one of them would leave the equivalence standing.
+    """
+    return [
+        Triple(p["a_iri"], OWL_SAME_AS, _iri(p["b_iri"])),
+        Triple(p["b_iri"], OWL_SAME_AS, _iri(p["a_iri"])),
+    ]
+
+
 # ── generic-schema renderers ─────────────────────────────────────
 
 
@@ -771,6 +785,7 @@ RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
     "UpsertExchangeRate": render_upsert_exchange_rate,
     "TranslateAuthorityName": render_translate_authority_name,
     "AssertSameAs": render_assert_same_as,
+    "RetractSameAs": render_retract_same_as,
 }
 
 
@@ -785,25 +800,30 @@ RENDERERS: dict[str, Callable[[dict], list[Triple]] | None] = {
 # translations.
 SCOPED_REPLACE_PREDICATES: dict[str, tuple[str, ...]] = {
     "TranslateAuthorityName": (SKOS_ALT_LABEL,),
-    # AssertSameAs carries ONE triple about a subject that already exists
-    # and is described by its own Upsert event. Without an entry here it
-    # falls to the default branch of _delete_clause —
-    #   DELETE WHERE { GRAPH <g> { <subject> ?p ?o } }
-    # — which wipes the company's whole record and re-inserts only the
-    # owl:sameAs. Measured in prod on 2026-09-02: every subject carrying
-    # owl:sameAs had exactly 1 property where an untouched company has 7
-    # (type, label, lei, country, active, legalForm, postalCode), and
-    # 27,696 companies had been stripped within hours of the
-    # consolidator's emit being enabled.
-    #
-    # It also made the two event types fight: an UpsertCompany landing
-    # after an AssertSameAs removed the equivalence again, so only ~15%
-    # of emitted events survived as triples. Scoping to owl:sameAs lets
-    # both coexist — the upsert owns the entity's attributes, this owns
-    # its equivalences — while still replacing rather than accumulating
-    # stale sameAs for a subject whose matches have changed.
-    "AssertSameAs": (OWL_SAME_AS,),
 }
+
+
+# Events whose triples are ADDED without deleting anything first.
+#
+# AssertSameAs was a scoped replace on owl:sameAs, which fixed it
+# destroying the company's other attributes but replaced that bug with a
+# quieter one: the scoped DELETE clears EVERY prior
+# `<subject> owl:sameAs ?o` before inserting, so a subject can only ever
+# hold the last equivalence written. Measured in prod 2026-09-04: 27,452
+# subjects carried owl:sameAs and every single one had exactly 1 — not
+# one subject had 2, from 1.34M emitted assertions across ~541k nodes.
+# An entity with three duplicates kept one of them at random.
+#
+# Replace semantics only made sense while the event stream was a
+# continuously recomputed set of guesses. It no longer is: an
+# AssertSameAs is now a single approved equivalence, a discrete fact that
+# accumulates. Staleness is handled by RetractSameAs, which withdraws one
+# specific equivalence, rather than by every new assertion silently
+# clearing the others.
+ADDITIVE_EVENTS: frozenset[str] = frozenset({"AssertSameAs"})
+
+# Events that DELETE their rendered triples instead of inserting them.
+RETRACTION_EVENTS: frozenset[str] = frozenset({"RetractSameAs"})
 
 
 def to_turtle(triples: list[Triple]) -> str:

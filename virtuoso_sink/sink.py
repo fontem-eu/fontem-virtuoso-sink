@@ -25,7 +25,8 @@ from fontem_event_schemas import EventEnvelope
 from fontem_events import EventConsumer
 
 from .triples import (
-    OWL_SAME_AS, RENDERERS, SCOPED_REPLACE_PREDICATES, Triple,
+    ADDITIVE_EVENTS, OWL_SAME_AS, RENDERERS, RETRACTION_EVENTS,
+    SCOPED_REPLACE_PREDICATES, Triple,
     contract_notice_subject, to_turtle,
 )
 
@@ -76,6 +77,11 @@ def _delete_clause(g_iri: str, s_iri: str, event_type: str) -> str:
     """The DELETE half of an upsert UPDATE. A scoped-replace event clears
     only its enrichment predicate(s) for the subject so the subject's
     other triples survive; every other event wipes the whole subject."""
+    if event_type in ADDITIVE_EVENTS:
+        # Nothing is cleared: the event states one discrete fact that
+        # accumulates alongside the subject's others. Deleting first is
+        # what made a subject able to hold only one owl:sameAs.
+        return ""
     scoped = SCOPED_REPLACE_PREDICATES.get(event_type)
     if scoped:
         return "".join(
@@ -314,10 +320,18 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 f"DELETE WHERE {{ GRAPH <{g_iri}> "
                 f"{{ <{s_iri}> ?p ?o }} }}"
             )
+        elif ev.event_type in RETRACTION_EVENTS:
+            # A retraction removes exactly the triples it renders and
+            # touches nothing else. DELETE DATA on an absent triple is a
+            # no-op in SPARQL, so retracting twice, or retracting a
+            # direction that was never written, is harmless.
+            triples_ttl = to_turtle(triples).rstrip()
+            update = f"DELETE DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
         else:
             # Upsert: delete then insert, in one transaction. Scoped-
             # replace events clear only their enrichment predicate(s);
-            # everything else wipes the whole subject (see _delete_clause).
+            # additive events clear nothing; everything else wipes the
+            # whole subject (see _delete_clause).
             triples_ttl = to_turtle(triples).rstrip()
             update = (
                 extra_cleanup
