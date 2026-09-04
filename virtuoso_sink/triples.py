@@ -489,9 +489,32 @@ def render_translate_authority_name(p: dict) -> list[Triple]:
     return out
 
 
+def _publication_number_triples(iri: str, p: dict) -> list[Triple]:
+    """The human-readable TED id ("295342-2026").
+
+    Without it a reader has to call the runtime lookup endpoint to build
+    a TED link — a per-row round trip on a page that lists 50 contracts.
+    Shared by both grains so neither can drift.
+    """
+    if pubnum := _lit(p.get("ted_publication_number")):
+        return [Triple(iri, f"{FONTEM}tedPublicationNumber", pubnum,
+                       is_literal=True)]
+    return []
+
+
 def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
-    """Monetary-value triples (eur / currency / original), split out of
-    render_upsert_contract to keep its cognitive complexity in check."""
+    """Monetary-value triples (eur / currency / original / quality),
+    split out of render_upsert_contract to keep its cognitive complexity
+    in check. Shared by both grains, so a field added here reaches the
+    legacy Contract subject and the Notice subject alike.
+
+    The quality fields are not decoration. A reader seeing valueEur with
+    no valueLowConfidence and no valueQualityFlag cannot tell a
+    trustworthy figure from an `implausible_magnitude` one, and will sum
+    them together — which is exactly what the Neo4j read path guards
+    against with trusted_value_sum. Projecting the value without its
+    caveat is worse than projecting neither.
+    """
     out: list[Triple] = []
     if (v_eur := p.get("value_eur")) is not None:
         v = _decimal(v_eur)
@@ -517,6 +540,39 @@ def _contract_value_triples(iri: str, p: dict) -> list[Triple]:
             out.append(
                 Triple(iri, f"{FONTEM}valueBeforeOriginal", v, is_literal=True)
             )
+    out.extend(_contract_value_quality_triples(iri, p))
+    return out
+
+
+def _contract_value_quality_triples(iri: str, p: dict) -> list[Triple]:
+    """How much to trust the monetary value.
+
+    Booleans are emitted only when TRUE: absent means "not flagged", and
+    a `false` triple on 750k contracts is 750k triples saying nothing.
+    """
+    out: list[Triple] = []
+    if p.get("value_low_confidence"):
+        out.append(Triple(iri, f"{FONTEM}valueLowConfidence",
+                          f'"true"^^<{XSD_BOOLEAN}>', is_literal=True))
+    if p.get("value_payable_discrepancy"):
+        out.append(Triple(iri, f"{FONTEM}valuePayableDiscrepancy",
+                          f'"true"^^<{XSD_BOOLEAN}>', is_literal=True))
+    # "ok" is the overwhelmingly common value and tells a reader nothing
+    # actionable; the seven other flags are the ones worth carrying.
+    flag = _lit(p.get("value_quality_flag"))
+    if flag and flag != '"ok"':
+        out.append(Triple(iri, f"{FONTEM}valueQualityFlag", flag,
+                          is_literal=True))
+    if (conf := p.get("value_confidence")) is not None:
+        v = _decimal(conf)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}valueConfidence", v,
+                              is_literal=True))
+    if (est := p.get("estimated_value_eur")) is not None:
+        v = _decimal(est)
+        if v is not None:
+            out.append(Triple(iri, f"{FONTEM}estimatedValueEur", v,
+                              is_literal=True))
     return out
 
 
@@ -605,6 +661,7 @@ def _render_contract_notice_grain(p: dict) -> list[Triple]:
         c_iri = f"http://data.fontem.eu/id/Company/{cid}"
         out.append(Triple(notice_iri, f"{FONTEM}awardedTo", _iri(c_iri)))
     out.extend(_contract_party_triples(notice_iri, p))
+    out.extend(_publication_number_triples(notice_iri, p))
     if pd := (p.get("publication_date") or "").strip()[:10]:
         out.append(Triple(notice_iri, f"{FONTEM}publicationDate",
                           f'"{pd}"^^<{XSD_DATE}>', is_literal=True))
@@ -661,6 +718,7 @@ def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many
     if cid := p.get("company_gmr_id"):
         c_iri = f"http://data.fontem.eu/id/Company/{cid}"
         out.append(Triple(iri, f"{FONTEM}awardedTo", _iri(c_iri)))
+    out.extend(_publication_number_triples(iri, p))
     if pd := (p.get("publication_date") or "").strip()[:10]:
         out.append(Triple(iri, f"{FONTEM}publicationDate",
                           f'"{pd}"^^<{XSD_DATE}>', is_literal=True))
