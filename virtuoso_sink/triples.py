@@ -597,6 +597,52 @@ def _contract_value_quality_triples(iri: str, p: dict) -> list[Triple]:
 _ROLLUP_ONLY_KEYS = {"ted_notice_id", "current_value", "is_current", "contract_key"}
 
 
+CURRENT_VALUE = f"{FONTEM}currentValue"
+IS_CURRENT = f"{FONTEM}isCurrent"
+
+
+def is_rollup_only(p: dict) -> bool:
+    """True for a value-collapse partial: it carries the rollup fields
+    and nothing else. `{"ted_notice_id"}` alone is not a rollup — it is a
+    degenerate full event and still means whole-subject replace."""
+    return set(p).issubset(_ROLLUP_ONLY_KEYS) and p.keys() != {"ted_notice_id"}
+
+
+def rollup_scoped_predicates(event_type: str, payload: dict) -> tuple[str, ...] | None:
+    """Predicates a rollup partial replaces, or None if not a rollup.
+
+    Separate from SCOPED_REPLACE_PREDICATES because that map keys on
+    event type alone, and a rollup arrives as an UpsertContract exactly
+    like a full one — the difference is in the payload.
+    """
+    if event_type == "UpsertContract" and is_rollup_only(payload):
+        return (CURRENT_VALUE, IS_CURRENT)
+    return None
+
+
+def _render_contract_rollup(p: dict) -> list[Triple]:
+    """The collapse pass's verdict for one notice: the contract's current
+    value, and whether this notice is the canonical one for it.
+
+    Without these a reader must fall back to `notice_type != 'can-modif'`
+    and the raw value_eur — which does not double-count, but does miss
+    the collapsed figure for every modified contract.
+    """
+    subject = contract_notice_subject(p) or (
+        f"http://data.fontem.eu/id/Contract/{p['ted_notice_id']}"
+    )
+    out: list[Triple] = []
+    if (cv := p.get("current_value")) is not None:
+        v = _decimal(cv)
+        if v is not None:
+            out.append(Triple(subject, CURRENT_VALUE, v, is_literal=True))
+    if (cur := p.get("is_current")) is not None:
+        out.append(Triple(subject, IS_CURRENT,
+                          f'"{str(bool(cur)).lower()}"^^<{XSD_BOOLEAN}>',
+                          is_literal=True))
+    return out
+
+
 def contract_notice_subject(p: dict) -> str | None:
     """The wipe-and-replace subject for a notice-grain (contract_key)
     UpsertContract: the Notice subject, keyed by ted_notice_id. Returns
@@ -693,10 +739,18 @@ def render_upsert_contract(p: dict) -> list[Triple]:  # pylint: disable=too-many
     # currency, dates, authority/company IRIs, CPV, NUTS, lot info)
     # that map 1:1 to local vars used to conditionally emit triples.
     # Splitting just shuffles the same locals across helpers.
-    if set(p).issubset(_ROLLUP_ONLY_KEYS) and p.keys() != {"ted_notice_id"}:
-        # Rollup-only value-collapse partial — skip (see note above). Returning
-        # [] makes the sink's handle() drop the event without a wipe.
-        return []
+    if is_rollup_only(p):
+        # Value-collapse partial. Rendered, not dropped: current_value and
+        # is_current are what let a reader sum a modified contract once
+        # instead of once per restatement, and Neo4j has had them all
+        # along while this store did not.
+        #
+        # Safe now because the sink scopes the replace to exactly these
+        # predicates (see rollup_scoped_predicates). It was NOT safe
+        # before: this sink upserts by whole-subject wipe, so rendering a
+        # partial would have deleted the subject's real triples and
+        # re-inserted only the rollup.
+        return _render_contract_rollup(p)
     if contract_notice_subject(p):
         # New Contract/Notice grain: contract_key present → render at the
         # Notice subject. Events without contract_key (the entire log
