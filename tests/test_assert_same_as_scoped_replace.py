@@ -1,4 +1,4 @@
-"""AssertSameAs must not wipe the subject it is describing.
+"""AssertSameAs must not wipe anything — not the subject, not itself.
 
 _delete_clause has two branches: a scoped replace that clears only the
 event's own predicates, and a default that clears the whole subject. The
@@ -12,35 +12,75 @@ untouched company has 7 (type, label, lei, country, active, legalForm,
 postalCode), and 27,696 companies had been stripped. It also made the two
 event types fight — an UpsertCompany landing after an AssertSameAs removed
 the equivalence again, so only ~15% of emitted events survived as triples.
+
+Scoping it to owl:sameAs fixed that and introduced a quieter bug in its
+place. A scoped DELETE clears every prior `<subject> owl:sameAs ?o`, so a
+subject could only ever hold the LAST equivalence written. Measured in
+prod 2026-09-04: 27,452 subjects carried owl:sameAs and every single one
+had exactly 1 — not one had 2, out of 1.34M assertions across ~541k
+nodes. An entity with three duplicates kept one at random.
+
+Replace semantics only made sense while the stream was a continuously
+recomputed set of guesses. An AssertSameAs is now a single approved
+equivalence: a discrete fact that accumulates. Withdrawal is the job of
+RetractSameAs, which removes one specific equivalence, not of the next
+assertion silently clearing the others.
 """
 from virtuoso_sink.sink import _delete_clause
 from virtuoso_sink.sink import _PRESERVED_ON_REPLACE
-from virtuoso_sink.triples import OWL_SAME_AS, SCOPED_REPLACE_PREDICATES
+from virtuoso_sink.triples import (
+    ADDITIVE_EVENTS, OWL_SAME_AS, RETRACTION_EVENTS,
+    SCOPED_REPLACE_PREDICATES, render_retract_same_as,
+)
 
 _G = "http://data.fontem.eu/graph/company"
 _S = "http://data.fontem.eu/id/Company/abc"
 
 
-def test_assert_same_as_is_scoped():
-    assert SCOPED_REPLACE_PREDICATES.get("AssertSameAs") == (OWL_SAME_AS,)
+def test_assert_same_as_is_additive():
+    assert "AssertSameAs" in ADDITIVE_EVENTS
+    assert "AssertSameAs" not in SCOPED_REPLACE_PREDICATES
 
 
-def test_assert_same_as_clause_touches_only_same_as():
-    """The regression: a bare ?p would take the entity's whole record."""
+def test_assert_same_as_deletes_nothing():
+    """The whole point. An assertion states one fact and removes none.
+
+    A bare `?p ?o` would take the entity's whole record (the 2026-09-02
+    incident); a scoped delete on owl:sameAs would take the subject's
+    other equivalences (the 2026-09-04 one). Neither is acceptable, so
+    the clause must be empty.
+    """
     clause = _delete_clause(_G, _S, "AssertSameAs")
-    assert OWL_SAME_AS in clause
-    assert "?p ?o" not in clause, (
-        "AssertSameAs is deleting every predicate of its subject — this is "
-        "what stripped 27,696 companies in prod"
+    assert clause == "", (
+        "AssertSameAs is deleting something — an assertion accumulates, "
+        "it does not replace"
     )
 
 
-def test_assert_same_as_still_replaces_rather_than_accumulates():
-    """Scoped, not skipped: re-asserting for a subject whose matches
-    changed must not leave the stale equivalences behind."""
-    clause = _delete_clause(_G, _S, "AssertSameAs")
-    assert clause.strip().startswith("DELETE WHERE")
-    assert _S in clause
+def test_a_subject_can_hold_several_equivalences():
+    """The regression that produced exactly-one-sameAs-per-subject.
+
+    Two assertions about the same subject must both survive: a company
+    with three duplicates has three equivalences, not the last one
+    written.
+    """
+    assert _delete_clause(_G, _S, "AssertSameAs") == ""
+
+
+def test_retraction_removes_both_directions():
+    """owl:sameAs is symmetric and which direction was written depends on
+    which side the consolidator treated as source. Removing one leaves
+    the equivalence standing."""
+    triples = render_retract_same_as({"a_iri": "urn:a", "b_iri": "urn:b"})
+    assert len(triples) == 2
+    assert all(t.p == OWL_SAME_AS for t in triples)
+    subjects = {t.s for t in triples}
+    assert subjects == {"urn:a", "urn:b"}
+
+
+def test_retraction_is_registered_as_a_delete():
+    assert "RetractSameAs" in RETRACTION_EVENTS
+    assert "RetractSameAs" not in ADDITIVE_EVENTS
 
 
 def test_upsert_still_wipes_the_whole_subject():
@@ -51,13 +91,12 @@ def test_upsert_still_wipes_the_whole_subject():
 
 
 def test_upsert_and_assert_no_longer_destroy_each_other():
-    """The two clauses must not overlap beyond owl:sameAs, or whichever
-    event lands last wins and the other's work disappears."""
-    assert_clause = _delete_clause(_G, _S, "AssertSameAs")
-    # The assert clause must be narrow enough that an UpsertCompany's
-    # attributes (label, lei, country...) are not in its blast radius.
-    for pred in ("rdf-schema#label", "ontology#lei", "ontology#legalForm"):
-        assert pred not in assert_clause
+    """The two streams must not overlap: the upsert owns the entity's
+    attributes, the assertion owns its equivalences, and an assertion
+    deletes nothing at all."""
+    assert _delete_clause(_G, _S, "AssertSameAs") == ""
+    upsert_clause = _delete_clause(_G, _S, "UpsertCompany")
+    assert f"FILTER(?p != <{OWL_SAME_AS}>)" in upsert_clause
 
 
 def test_upsert_replace_preserves_same_as():

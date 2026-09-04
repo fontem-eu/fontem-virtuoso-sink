@@ -249,7 +249,7 @@ def test_renderer_registry_covers_all_event_types() -> None:
         "UpsertTaxonomyCode", "UpsertRelationship",
         "UpsertDisclosure", "UpsertExchangeRate",
         "TranslateAuthorityName",
-        "AssertSameAs",
+        "AssertSameAs", "RetractSameAs",
     }
     assert set(RENDERERS) == expected
 
