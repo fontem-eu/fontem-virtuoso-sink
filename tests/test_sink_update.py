@@ -1,6 +1,6 @@
 """SPARQL UPDATE path tests — verify the big-data-const override."""
 # Tests legitimately reach into the sink's private API: the directive
-# behaviour we want to lock down sits on _sparql_update and _client.
+# behaviour we want to lock down sits on the update text and _client.
 # pylint: disable=protected-access,redefined-outer-name,import-outside-toplevel
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ def _make_sink():
         sink.dba_password = "secret"
         sink.timeout = 30.0
         sink._open_brackets = defaultdict(list)
+        sink._update_batch = 200
         base = sink.sparql_endpoint.rstrip("/").removesuffix("/sparql")
         sink._update_url = f"{base}/sparql-auth"
         sink._crud_url = f"{base}/sparql-graph-crud-auth"
@@ -52,6 +53,15 @@ def _ev(op: str, iri: str = "http://data.fontem.eu/id/Company/abc", domain: str 
     return ev
 
 
+
+def _apply_one(sink, ev, triples):
+    """Build one event's update and send it, the way handle() does for a
+    single-event batch. The build and the post are separate now so N
+    events can share one request (see sink._post_updates); these tests
+    are about what the update SAYS, so they go through both."""
+    sink._post_updates([sink._build_update(ev, triples)])
+
+
 def test_insert_update_prepends_big_data_const_directive(sink_env):  # pylint: disable=unused-argument
     """An upsert UPDATE must start with `define sql:big-data-const 1` —
     without it, /sparql-auth's silent `0` prepend pushes the query down
@@ -67,7 +77,7 @@ def test_insert_update_prepends_big_data_const_directive(sink_env):  # pylint: d
             '"Acme"',
         ),
     ]
-    sink._sparql_update(_ev("insert"), triples)
+    _apply_one(sink, _ev("insert"), triples)
 
     sink._client.post.assert_called_once()
     body = sink._client.post.call_args.kwargs["data"]["query"]
@@ -84,7 +94,7 @@ def test_delete_update_prepends_big_data_const_directive(sink_env):  # pylint: d
     """DELETE-only events still walk the same hash-cache path; same
     SR580 risk, same directive required."""
     sink = _make_sink()
-    sink._sparql_update(_ev("delete"), [])
+    _apply_one(sink, _ev("delete"), [])
 
     sink._client.post.assert_called_once()
     body = sink._client.post.call_args.kwargs["data"]["query"]
@@ -108,7 +118,7 @@ def test_translate_authority_name_is_scoped_replace(sink_env):  # pylint: disabl
         Triple("http://data.fontem.eu/id/Authority/a-1", SKOS_ALT_LABEL,
                '"Stadtamt"@de', is_literal=True),
     ]
-    sink._sparql_update(ev, triples)
+    _apply_one(sink, ev, triples)
 
     body = sink._client.post.call_args.kwargs["data"]["query"]
     assert body.startswith("define sql:big-data-const 1\n"), body[:80]
@@ -127,7 +137,7 @@ def test_update_post_targets_sparql_auth_endpoint(sink_env):  # pylint: disable=
     sink = _make_sink()
     from virtuoso_sink.triples import Triple
 
-    sink._sparql_update(
+    _apply_one(sink,
         _ev("insert"),
         [Triple("http://x/a", "http://x/p", '"v"')],
     )
@@ -158,7 +168,7 @@ def test_fund_domain_event_writes_to_company_graph(sink_env):  # pylint: disable
              iri="http://data.fontem.eu/id/InvestmentFund/f1", domain="fund")
     ev.event_type = "UpsertInvestmentFund"
     ev.payload = {"gmr_id": "f1"}
-    sink._sparql_update(ev, [Triple(
+    _apply_one(sink, ev, [Triple(
         "http://data.fontem.eu/id/InvestmentFund/f1",
         "http://www.w3.org/2000/01/rdf-schema#label", '"A Fund"')])
     body = sink._client.post.call_args.kwargs["data"]["query"]
@@ -185,7 +195,7 @@ def test_notice_grain_contract_wipes_notice_subject_not_contract(sink_env):  # p
              iri="http://data.fontem.eu/id/Contract/n-77", domain="contract")
     ev.event_type = "UpsertContract"
     ev.payload = payload
-    sink._sparql_update(ev, render_upsert_contract(payload))
+    _apply_one(sink, ev, render_upsert_contract(payload))
 
     body = sink._client.post.call_args.kwargs["data"]["query"]
     assert body.startswith("define sql:big-data-const 1\n")
@@ -210,9 +220,77 @@ def test_legacy_contract_still_wipes_ev_iri(sink_env):  # pylint: disable=unused
              domain="contract")
     ev.event_type = "UpsertContract"
     ev.payload = payload
-    sink._sparql_update(ev, render_upsert_contract(payload))
+    _apply_one(sink, ev, render_upsert_contract(payload))
 
     body = sink._client.post.call_args.kwargs["data"]["query"]
     delete_clause = body.split("INSERT DATA", 1)[0]
     assert "<http://data.fontem.eu/id/Contract/n-legacy> ?p ?o" in delete_clause
     assert "Notice/" not in body
+
+
+# ── batched updates ───────────────────────────────────────────────
+#
+# The sink did one HTTP round trip per event. Measured on the shared
+# replay: ~133 events/s, ~7.5s per 1000-event consumer batch, essentially
+# all round-trip latency — a full prod replay of 66.3M events would be
+# ~5.75 days waiting on the network rather than on Virtuoso.
+#
+# Three things must hold for batching to be safe: ORDER (a later
+# whole-subject replace still wins), the BRACKET boundary (a buffered
+# update must not land after a graph PUT meant to follow it), and
+# ISOLATION (one bad event must not poison the 199 sharing its request).
+
+
+def test_group_is_sent_as_one_request(sink_env):  # pylint: disable=unused-argument
+    sink = _make_sink()
+    sink._post_updates(["DELETE { a } ; INSERT DATA { b }", "INSERT DATA { c }"])
+    sink._client.post.assert_called_once()
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert body.count("INSERT DATA") == 2
+
+
+def test_batched_order_is_preserved(sink_env):  # pylint: disable=unused-argument
+    """A later whole-subject replace must win over an earlier one, which
+    only holds if the statements stay in sequence."""
+    sink = _make_sink()
+    sink._post_updates(["INSERT DATA { FIRST }", "INSERT DATA { SECOND }"])
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert body.index("FIRST") < body.index("SECOND")
+
+
+def test_directive_is_prepended_once_not_per_statement(sink_env):  # pylint: disable=unused-argument
+    """`define sql:big-data-const 1` is a query-level directive: repeating
+    it mid-request is a syntax error, omitting it is the SR580
+    dirty-hash-cache failure."""
+    sink = _make_sink()
+    sink._post_updates(["INSERT DATA { a }", "INSERT DATA { b }"])
+    body = sink._client.post.call_args.kwargs["data"]["query"]
+    assert body.count("define sql:big-data-const 1") == 1
+    assert body.startswith("define sql:big-data-const 1")
+
+
+def test_a_failed_group_is_retried_one_at_a_time(sink_env):  # pylint: disable=unused-argument
+    """A batch failure says nothing about WHICH event was bad, and the
+    consumer dead-letters by seq — so the retry has to be per-event or
+    one poison event takes 199 good ones with it."""
+    sink = _make_sink()
+    calls: list[str] = []
+
+    def post(_url, data=None, **_kw):
+        calls.append(data["query"])
+        resp = MagicMock()
+        if len(calls) == 1:          # the batched attempt
+            resp.raise_for_status.side_effect = RuntimeError("bad batch")
+        return resp
+
+    sink._client.post = MagicMock(side_effect=post)
+    sink._post_updates(["INSERT DATA { a }", "INSERT DATA { b }"])
+
+    assert len(calls) == 3           # 1 batched + 2 isolated retries
+    assert "a" in calls[1] and "b" in calls[2]
+
+
+def test_empty_group_sends_nothing(sink_env):  # pylint: disable=unused-argument
+    sink = _make_sink()
+    sink._post_updates([])
+    sink._client.post.assert_not_called()
