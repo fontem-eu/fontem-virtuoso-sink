@@ -159,6 +159,14 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # round trips by the same factor.
         self._update_batch = int(os.environ.get("VIRTUOSO_UPDATE_BATCH", "200"))
 
+        # Triples held in memory before a graph-replace bracket flushes a
+        # chunk to its staging graph. Bounds the sink's memory to this
+        # many triples rather than to the size of the largest graph in
+        # the log — the edgar bracket alone spans 66,971 events.
+        self._bracket_chunk = int(
+            os.environ.get("VIRTUOSO_BRACKET_CHUNK", "20000")
+        )
+
         # One Client + one DigestAuth for the sink's lifetime: keepalive
         # the TCP connection and cache the digest challenge after the
         # first 401. Prior code recreated both per request, so every
@@ -171,7 +179,7 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # SPARQL results JSON. It is wrong for /sparql-graph-crud-auth,
         # which answers a graph-store write with a plain status document
         # and returns 406 rather than ignore an Accept it cannot honour.
-        # _put_replace overrides it; see the note there before removing
+        # _stage_chunk overrides it; see the note there before removing
         # that override.
         self._client = httpx.Client(
             timeout=self.timeout,
@@ -198,8 +206,11 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         graph = ev.payload["graph_iri"]
         if ev.event_type == "BeginGraphReplace":
             # Open or reset the bracket. Re-opening with the same key
-            # wipes any half-buffered state from a prior crash window.
+            # wipes any half-buffered state from a prior crash window,
+            # and clearing staging drops whatever an interrupted run
+            # left behind there.
             open_brackets[graph] = []
+            self._clear_staging(graph)
             logger.info("bracket-begin %s", graph)
             return
 
@@ -210,11 +221,12 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 "treating as no-op", graph,
             )
             return
-        # Ordering: buffered per-event updates must land BEFORE the PUT
-        # replaces the graph, or one of them would be silently discarded.
+        # Ordering: buffered per-event updates must land BEFORE the
+        # graph is replaced, or one of them would be silently discarded.
         self._post_updates(pending)
         pending.clear()
-        self._put_replace(graph, triples)
+        self._stage_chunk(graph, triples)
+        self._swap_staging_in(graph)
 
     def handle(self, batch: list[EventEnvelope]) -> None:
         """Walk events left-to-right, group by Begin/End bracket
@@ -255,7 +267,11 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 open_brackets, ev.domain,
             )
             if bracket_graph is not None:
-                open_brackets[bracket_graph].extend(triples)
+                buf = open_brackets[bracket_graph]
+                buf.extend(triples)
+                if len(buf) >= self._bracket_chunk:
+                    self._stage_chunk(bracket_graph, buf)
+                    buf.clear()
                 continue
 
             # No bracket → per-event update, batched.
@@ -293,27 +309,69 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
             return next(iter(brackets))
         return None
 
-    def _put_replace(self, graph_iri: str, triples: list[Triple]) -> None:
+    @staticmethod
+    def _staging_graph(graph_iri: str) -> str:
+        """Where a graph-replace accumulates before it is swapped in."""
+        return f"{graph_iri.rstrip('/')}/_replace_staging"
+
+    def _stage_chunk(self, graph_iri: str, triples: list[Triple]) -> None:
+        """APPEND a chunk of a graph-replace to its staging graph.
+
+        POST is merge semantics in the graph-store protocol, so chunks
+        accumulate. This is what keeps a bracket's memory bounded: the
+        sink holds at most VIRTUOSO_BRACKET_CHUNK triples instead of the
+        whole graph.
+        """
+        if not triples:
+            return
         body = to_turtle(triples)
-        r = self._client.put(
+        r = self._client.post(
             self._crud_url,
-            params={"graph": graph_iri},
+            params={"graph": self._staging_graph(graph_iri)},
             content=body,
-            # Accept must be widened here. The client-wide default asks
-            # for application/sparql-results+json, which the graph-store
-            # endpoint cannot produce for a write, so Virtuoso rejects
-            # the request with 406 before it ever looks at the body —
-            # the payload is irrelevant, a one-triple PUT fails exactly
-            # the same way. That silently broke every bracketed
-            # graph-replace: the daily sanctions replace had been
-            # failing this way on every run.
             headers={"Content-Type": "text/turtle", "Accept": "*/*"},
         )
         r.raise_for_status()
-        logger.info(
-            "put-replace <%s>: %d triples (%d bytes)",
+        logger.debug(
+            "stage-chunk <%s>: %d triples (%d bytes)",
             graph_iri, len(triples), len(body),
         )
+
+    def _clear_staging(self, graph_iri: str) -> None:
+        """Drop whatever a previous, interrupted run left staged."""
+        staging = self._staging_graph(graph_iri)
+        r = self._client.post(
+            self._update_url,
+            data={"query": _BIG_DATA_CONST_OVERRIDE
+                  + f"CLEAR SILENT GRAPH <{staging}>"},
+        )
+        r.raise_for_status()
+
+    def _swap_staging_in(self, graph_iri: str) -> None:
+        """Replace the live graph with the staged one, atomically.
+
+        MOVE GRAPH is a single SPARQL 1.1 operation: it replaces the
+        destination with the source and drops the source. That matters
+        more than the memory saving. The old code accumulated the whole
+        graph in RAM and PUT it in one request, so an OOM or a crash
+        mid-bracket left a PARTIAL graph written over the real one —
+        silently, because a half-finished replace looks like a
+        successful small one. That is not hypothetical: replaying
+        shared on 2026-09-06 OOM-killed Virtuoso mid-bracket and took
+        graph/sanctions from 60,250 triples to 21,646.
+
+        Staging inverts the failure: a crash leaves the live graph
+        untouched and abandons a partial staging graph, which the next
+        Begin clears.
+        """
+        staging = self._staging_graph(graph_iri)
+        r = self._client.post(
+            self._update_url,
+            data={"query": _BIG_DATA_CONST_OVERRIDE
+                  + f"MOVE GRAPH <{staging}> TO <{graph_iri}>"},
+        )
+        r.raise_for_status()
+        logger.info("swap-in <%s> from staging", graph_iri)
 
     def _build_update(self, ev: EventEnvelope, triples: list[Triple]) -> str:
         # No bracket → infer the target graph from the event's
