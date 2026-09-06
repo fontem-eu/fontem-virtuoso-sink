@@ -152,6 +152,13 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # handle() calls because batch_size caps each fetch.
         self._open_brackets: dict[str, list[Triple]] = defaultdict(list)
 
+        # How many per-event updates go in one HTTP request. The sink
+        # used to send one request per event, which made a full replay
+        # round-trip-bound rather than Virtuoso-bound. 200 keeps the
+        # request body well inside Virtuoso's limits while cutting the
+        # round trips by the same factor.
+        self._update_batch = int(os.environ.get("VIRTUOSO_UPDATE_BATCH", "200"))
+
         # One Client + one DigestAuth for the sink's lifetime: keepalive
         # the TCP connection and cache the digest challenge after the
         # first 401. Prior code recreated both per request, so every
@@ -185,6 +192,11 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         Brackets persist across handle() calls — see __init__.
         """
         open_brackets = self._open_brackets
+        # Per-event updates are accumulated and sent in groups; see
+        # _post_updates. `pending` must be flushed before anything that
+        # writes by another route (a bracket PUT), or a buffered update
+        # would land AFTER a replace that was meant to precede it.
+        pending: list[str] = []
 
         for ev in batch:
             if ev.event_type == "BeginGraphReplace":
@@ -205,6 +217,8 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                         "treating as no-op", graph,
                     )
                     continue
+                self._post_updates(pending)
+                pending.clear()
                 self._put_replace(graph, triples)
                 continue
 
@@ -231,8 +245,14 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 open_brackets[bracket_graph].extend(triples)
                 continue
 
-            # No bracket → per-event update.
-            self._sparql_update(ev, triples)
+            # No bracket → per-event update, batched.
+            pending.append(self._build_update(ev, triples))
+            if len(pending) >= self._update_batch:
+                self._post_updates(pending)
+                pending.clear()
+
+        self._post_updates(pending)
+        pending.clear()
 
         # Any brackets still open at end-of-batch are stashed
         # for the next call — they'll close cleanly when the
@@ -282,7 +302,7 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
             graph_iri, len(triples), len(body),
         )
 
-    def _sparql_update(self, ev: EventEnvelope, triples: list[Triple]) -> None:
+    def _build_update(self, ev: EventEnvelope, triples: list[Triple]) -> str:
         # No bracket → infer the target graph from the event's
         # domain. For now we use the same name->graph convention
         # as the existing migrate script.
@@ -353,6 +373,45 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 + _delete_clause(g_iri, s_iri, ev.event_type, ev.payload)
                 + f"INSERT DATA {{ GRAPH <{g_iri}> {{ {triples_ttl} }} }}"
             )
+        logger.debug(
+            "sparql-update %s on <%s>: %d triples",
+            ev.event_type, graph_iri, len(triples),
+        )
+        return update
+
+    def _post_updates(self, updates: list[str]) -> None:
+        """Send N per-event updates as ONE request.
+
+        The sink did one HTTP round trip per event. Measured on the
+        shared replay: ~133 events/s, ~7.5s per 1000-event consumer
+        batch, essentially all of it round-trip latency. At that rate a
+        full prod replay of 66.3M events is ~5.75 days.
+
+        SPARQL update requests are a `;`-separated sequence applied in
+        order, which is exactly the per-event semantics already relied
+        on — a later event's whole-subject replace must win over an
+        earlier one — so concatenating preserves it.
+
+        On failure the group is re-applied one at a time. A batch that
+        fails tells you nothing about WHICH event was bad, and the
+        consumer's dead-letter records a seq; isolating keeps that
+        precise instead of poisoning 199 good events with one bad one.
+        """
+        if not updates:
+            return
+        joined = " ;\n".join(u.strip().rstrip(";").strip() for u in updates)
+        try:
+            self._post_one(joined)
+            return
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "batched update of %d failed; retrying individually to "
+                "isolate the offending event", len(updates),
+            )
+        for update in updates:
+            self._post_one(update)
+
+    def _post_one(self, update: str) -> None:
         r = self._client.post(
             self._update_url,
             data={"query": _BIG_DATA_CONST_OVERRIDE + update},
@@ -360,10 +419,6 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # SPARQL endpoint accepts updates via ?query= too,
         # but Virtuoso prefers the dedicated /sparql-auth.
         r.raise_for_status()
-        logger.debug(
-            "sparql-update %s on <%s>: %d triples",
-            ev.event_type, graph_iri, len(triples),
-        )
 
     @staticmethod
     def _domain_default_graph(domain: str) -> str:
