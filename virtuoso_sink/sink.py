@@ -184,6 +184,38 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
 
     # ── EventConsumer hook ────────────────────────────────
 
+    def _handle_bracket_event(
+        self,
+        ev: EventEnvelope,
+        open_brackets: dict[str, list[Triple]],
+        pending: list[str],
+    ) -> None:
+        """Open or close a graph-replace bracket.
+
+        Split out of handle() to keep it readable: the bracket lifecycle
+        is its own concern and the walk is easier to follow without it.
+        """
+        graph = ev.payload["graph_iri"]
+        if ev.event_type == "BeginGraphReplace":
+            # Open or reset the bracket. Re-opening with the same key
+            # wipes any half-buffered state from a prior crash window.
+            open_brackets[graph] = []
+            logger.info("bracket-begin %s", graph)
+            return
+
+        triples = open_brackets.pop(graph, None)
+        if triples is None:
+            logger.warning(
+                "EndGraphReplace for %s without matching Begin; "
+                "treating as no-op", graph,
+            )
+            return
+        # Ordering: buffered per-event updates must land BEFORE the PUT
+        # replaces the graph, or one of them would be silently discarded.
+        self._post_updates(pending)
+        pending.clear()
+        self._put_replace(graph, triples)
+
     def handle(self, batch: list[EventEnvelope]) -> None:
         """Walk events left-to-right, group by Begin/End bracket
         per graph_iri, emit either a bulk PUT (closed bracket)
@@ -199,27 +231,8 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         pending: list[str] = []
 
         for ev in batch:
-            if ev.event_type == "BeginGraphReplace":
-                graph = ev.payload["graph_iri"]
-                # Open or reset the bracket. Re-opening with the
-                # same key wipes any half-buffered state from a
-                # prior crash window.
-                open_brackets[graph] = []
-                logger.info("bracket-begin %s", graph)
-                continue
-
-            if ev.event_type == "EndGraphReplace":
-                graph = ev.payload["graph_iri"]
-                triples = open_brackets.pop(graph, None)
-                if triples is None:
-                    logger.warning(
-                        "EndGraphReplace for %s without matching Begin; "
-                        "treating as no-op", graph,
-                    )
-                    continue
-                self._post_updates(pending)
-                pending.clear()
-                self._put_replace(graph, triples)
+            if ev.event_type in ("BeginGraphReplace", "EndGraphReplace"):
+                self._handle_bracket_event(ev, open_brackets, pending)
                 continue
 
             renderer = RENDERERS.get(ev.event_type)
