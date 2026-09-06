@@ -154,10 +154,22 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
 
         # How many per-event updates go in one HTTP request. The sink
         # used to send one request per event, which made a full replay
-        # round-trip-bound rather than Virtuoso-bound. 200 keeps the
-        # request body well inside Virtuoso's limits while cutting the
-        # round trips by the same factor.
-        self._update_batch = int(os.environ.get("VIRTUOSO_UPDATE_BATCH", "200"))
+        # round-trip-bound rather than Virtuoso-bound.
+        #
+        # 25, not the 200 this started at. The updates are joined with
+        # `;` and Virtuoso runs the whole request as ONE transaction, so
+        # the batch size is also the transaction size: 200 subjects'
+        # worth of locks and undo held until commit. Measured on the
+        # shared replay against identical events (seq 89,000 onward,
+        # from a freshly restarted Virtuoso each time):
+        #
+        #   batch 200 -> 320 events/s, +0.038 MiB anon per event
+        #   batch  25 -> 548 events/s, +0.032 MiB anon per event
+        #
+        # Bigger batches are both slower and hungrier here. The earlier
+        # assumption that batching wins on round trips stops holding
+        # once Virtuoso, not the network, is the bottleneck.
+        self._update_batch = int(os.environ.get("VIRTUOSO_UPDATE_BATCH", "25"))
 
         # Triples held in memory before a graph-replace bracket flushes a
         # chunk to its staging graph. Bounds the sink's memory to this
@@ -189,6 +201,28 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
 
     def close(self) -> None:
         self._client.close()
+
+    def is_retryable(self, exc: Exception) -> bool:
+        """Is this Virtuoso being unavailable rather than a bad event?
+
+        The consumer skips an event that fails max_attempts times in a
+        row, which is right for bad data and wrong for an outage: on
+        2026-09-06 Virtuoso was OOM-killed during a shared replay and
+        the sink skipped 4,006 events on "Connection refused". Nothing
+        re-emits a skipped event, so those triples were simply gone.
+
+        Everything here is a property of the transport or the server's
+        health, never of the payload: the same request succeeds once
+        Virtuoso is back. A 4xx other than 429 is NOT retryable — that
+        is Virtuoso rejecting this particular update, which is exactly
+        the poison case the skip exists for.
+        """
+        if isinstance(exc, (httpx.TransportError, httpx.StreamError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            code = exc.response.status_code
+            return code == 429 or 500 <= code < 600
+        return False
 
     # ── EventConsumer hook ────────────────────────────────
 
@@ -474,7 +508,12 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         try:
             self._post_one(joined)
             return
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            if self.is_retryable(exc):
+                # Virtuoso is down. Isolating would just make N more
+                # failed connections and learn nothing; the consumer
+                # holds the offset and replays this batch intact.
+                raise
             logger.warning(
                 "batched update of %d failed; retrying individually to "
                 "isolate the offending event", len(updates),
