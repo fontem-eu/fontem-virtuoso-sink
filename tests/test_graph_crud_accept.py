@@ -15,9 +15,12 @@ Two invariants live here.
 
 2. The staging/swap shape. A replace streams chunks into a staging
    graph and swaps it in with MOVE GRAPH at End. The live graph must
-   never be written incrementally: the previous buffer-then-PUT design
-   wrote a partial graph over the real one when the sink died
-   mid-bracket (shared, 2026-09-06: graph/sanctions 60,250 → 21,646).
+   never be written incrementally: under the previous buffer-then-PUT
+   design a PUT that died partway wrote a partial graph over the real
+   one, and the sink WAS OOM-killed mid-bracket replaying shared on
+   2026-09-06. The hazard is structural — a half-finished replace is
+   indistinguishable from a successful small one — rather than an
+   incident we have caught in the act.
 """
 # pylint: disable=protected-access,import-outside-toplevel
 from collections import defaultdict

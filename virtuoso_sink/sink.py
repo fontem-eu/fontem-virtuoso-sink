@@ -387,12 +387,20 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         MOVE GRAPH is a single SPARQL 1.1 operation: it replaces the
         destination with the source and drops the source. That matters
         more than the memory saving. The old code accumulated the whole
-        graph in RAM and PUT it in one request, so an OOM or a crash
-        mid-bracket left a PARTIAL graph written over the real one —
+        graph in RAM and PUT it in one request, and a PUT that dies
+        partway leaves a PARTIAL graph written over the real one —
         silently, because a half-finished replace looks like a
-        successful small one. That is not hypothetical: replaying
-        shared on 2026-09-06 OOM-killed Virtuoso mid-bracket and took
-        graph/sanctions from 60,250 triples to 21,646.
+        successful small one. The sink WAS OOM-killed mid-bracket
+        replaying shared on 2026-09-06, so the window was real.
+
+        (An earlier version of this comment claimed that incident took
+        graph/sanctions from 60,250 triples to 21,646. It did not.
+        21,646 is the exact output of the FIRST sanctions bracket,
+        seq 1..1588 — reproduced to the triple on a clean replay. The
+        graph was small because the interrupted replay stopped at seq
+        264,006, long before the final bracket at seq 7,217,131 that
+        produces 60,250. The hazard below is structural, not something
+        we have caught in the act.)
 
         Staging inverts the failure: a crash leaves the live graph
         untouched and abandons a partial staging graph, which the next
