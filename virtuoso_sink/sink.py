@@ -407,6 +407,7 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         Begin clears.
         """
         staging = self._staging_graph(graph_iri)
+        self._carry_over_preserved(graph_iri, staging)
         r = self._client.post(
             self._update_url,
             data={"query": _BIG_DATA_CONST_OVERRIDE
@@ -414,6 +415,35 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         )
         r.raise_for_status()
         logger.info("swap-in <%s> from staging", graph_iri)
+
+    def _carry_over_preserved(self, graph_iri: str, staging: str) -> None:
+        """Copy predicates another producer owns into staging before the swap.
+
+        _PRESERVED_ON_REPLACE keeps a whole-SUBJECT replace from deleting
+        predicates a different event stream writes. A whole-GRAPH replace
+        needs the same protection and never had it: MOVE GRAPH replaces
+        everything, so the bulk loader silently destroyed the
+        consolidator's owl:sameAs every time it reloaded.
+
+        Measured on shared after the 2026-09-06 full replay: of 38
+        AssertSameAs events routed to graph/sanctions, only the 6
+        asserted after the last EndGraphReplace survived. The other 32
+        were written, then wiped by the sanctions bracket at seq
+        7,217,131. The same exposure applies to financials/edgar and
+        financials/esef — every bracketed graph.
+
+        Carrying them into staging before the MOVE keeps the swap
+        atomic: no window exists where the live graph lacks them.
+        """
+        values = ", ".join(f"<{p}>" for p in _PRESERVED_ON_REPLACE)
+        r = self._client.post(
+            self._update_url,
+            data={"query": _BIG_DATA_CONST_OVERRIDE + f"""
+INSERT {{ GRAPH <{staging}> {{ ?s ?p ?o }} }}
+WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
+"""},
+        )
+        r.raise_for_status()
 
     def _build_update(self, ev: EventEnvelope, triples: list[Triple]) -> str:
         # No bracket → infer the target graph from the event's
