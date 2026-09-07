@@ -290,10 +290,7 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 continue
 
             if ev.event_type == "PurgeSubject":
-                pending.append(self._purge_subject_update(ev))
-                if len(pending) >= self._update_batch:
-                    self._post_updates(pending)
-                    pending.clear()
+                self._queue(pending, self._purge_subject_update(ev))
                 continue
 
             renderer = RENDERERS.get(ev.event_type)
@@ -305,29 +302,8 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
             if not triples:
                 continue
 
-            # Inside a bracket? Determine which one. We expect
-            # one bracket open per domain at a time; events
-            # carry domain so we can't naively pick a bracket.
-            # Convention: the producer asserts that the events
-            # between Begin(graph_X) and End(graph_X) are all
-            # destined for graph_X. We pick the one open bracket
-            # (if any) whose domain matches the event's domain.
-            bracket_graph = self._find_open_bracket_for_domain(
-                open_brackets, ev.domain,
-            )
-            if bracket_graph is not None:
-                buf = open_brackets[bracket_graph]
-                buf.extend(triples)
-                if len(buf) >= self._bracket_chunk:
-                    self._stage_chunk(bracket_graph, buf)
-                    buf.clear()
-                continue
-
-            # No bracket → per-event update, batched.
-            pending.append(self._build_update(ev, triples))
-            if len(pending) >= self._update_batch:
-                self._post_updates(pending)
-                pending.clear()
+            if not self._accumulate_into_bracket(ev, triples, open_brackets):
+                self._queue(pending, self._build_update(ev, triples))
 
         self._post_updates(pending)
         pending.clear()
@@ -337,6 +313,42 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # producer's End event lands. The consumer offset has
         # NOT advanced past those events yet, so a crash
         # mid-bracket re-reads them on resume.
+
+    def _queue(self, pending: list[str], update: str) -> None:
+        """Add one update to the pending group, flushing when full.
+
+        Extracted so the three call sites cannot drift on the flush
+        threshold, and so handle() stays a routing table rather than a
+        routing table with batching interleaved.
+        """
+        pending.append(update)
+        if len(pending) >= self._update_batch:
+            self._post_updates(pending)
+            pending.clear()
+
+    def _accumulate_into_bracket(
+        self, ev: EventEnvelope, triples: list[Triple],
+        open_brackets: dict[str, list[Triple]],
+    ) -> bool:
+        """Buffer triples into an open bracket. False when none applies.
+
+        We expect one bracket open per domain at a time; events carry
+        domain so we cannot naively pick a bracket. Convention: the
+        producer asserts that everything between Begin(graph_X) and
+        End(graph_X) is destined for graph_X, so we take the one open
+        bracket whose IRI matches the event's domain.
+        """
+        bracket_graph = self._find_open_bracket_for_domain(
+            open_brackets, ev.domain,
+        )
+        if bracket_graph is None:
+            return False
+        buf = open_brackets[bracket_graph]
+        buf.extend(triples)
+        if len(buf) >= self._bracket_chunk:
+            self._stage_chunk(bracket_graph, buf)
+            buf.clear()
+        return True
 
     # ── implementation ────────────────────────────────────
 
