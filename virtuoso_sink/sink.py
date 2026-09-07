@@ -72,6 +72,14 @@ def _stale_entity_subject(ev) -> "str | None":
 # being cleaned up by the producer that writes the rest of the subject.
 _PRESERVED_ON_REPLACE: tuple[str, ...] = (OWL_SAME_AS,)
 
+# The characters a subject IRI may carry unencoded. Every subject the
+# sink writes goes through quote() with this set, which makes the
+# encoded form a fixed point: quote(encoded) == encoded, and no input
+# maps to a raw non-ASCII IRI. That is why a subject written before
+# 37af28e (2026-06-07) cannot be named by any Delete* event, and why
+# PurgeSubject exists.
+_IRI_SAFE = "%:/?#[]@!$&\'()*+,;=._-~"
+
 
 def _delete_clause(
     g_iri: str, s_iri: str, event_type: str, payload: dict | None = None,
@@ -281,6 +289,10 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
                 self._handle_bracket_event(ev, open_brackets, pending)
                 continue
 
+            if ev.event_type == "PurgeSubject":
+                self._queue(pending, self._purge_subject_update(ev))
+                continue
+
             renderer = RENDERERS.get(ev.event_type)
             if renderer is None:
                 logger.debug("ignoring %s (no renderer)", ev.event_type)
@@ -290,29 +302,8 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
             if not triples:
                 continue
 
-            # Inside a bracket? Determine which one. We expect
-            # one bracket open per domain at a time; events
-            # carry domain so we can't naively pick a bracket.
-            # Convention: the producer asserts that the events
-            # between Begin(graph_X) and End(graph_X) are all
-            # destined for graph_X. We pick the one open bracket
-            # (if any) whose domain matches the event's domain.
-            bracket_graph = self._find_open_bracket_for_domain(
-                open_brackets, ev.domain,
-            )
-            if bracket_graph is not None:
-                buf = open_brackets[bracket_graph]
-                buf.extend(triples)
-                if len(buf) >= self._bracket_chunk:
-                    self._stage_chunk(bracket_graph, buf)
-                    buf.clear()
-                continue
-
-            # No bracket → per-event update, batched.
-            pending.append(self._build_update(ev, triples))
-            if len(pending) >= self._update_batch:
-                self._post_updates(pending)
-                pending.clear()
+            if not self._accumulate_into_bracket(ev, triples, open_brackets):
+                self._queue(pending, self._build_update(ev, triples))
 
         self._post_updates(pending)
         pending.clear()
@@ -322,6 +313,42 @@ class VirtuosoSink(EventConsumer):  # pylint: disable=too-many-instance-attribut
         # producer's End event lands. The consumer offset has
         # NOT advanced past those events yet, so a crash
         # mid-bracket re-reads them on resume.
+
+    def _queue(self, pending: list[str], update: str) -> None:
+        """Add one update to the pending group, flushing when full.
+
+        Extracted so the three call sites cannot drift on the flush
+        threshold, and so handle() stays a routing table rather than a
+        routing table with batching interleaved.
+        """
+        pending.append(update)
+        if len(pending) >= self._update_batch:
+            self._post_updates(pending)
+            pending.clear()
+
+    def _accumulate_into_bracket(
+        self, ev: EventEnvelope, triples: list[Triple],
+        open_brackets: dict[str, list[Triple]],
+    ) -> bool:
+        """Buffer triples into an open bracket. False when none applies.
+
+        We expect one bracket open per domain at a time; events carry
+        domain so we cannot naively pick a bracket. Convention: the
+        producer asserts that everything between Begin(graph_X) and
+        End(graph_X) is destined for graph_X, so we take the one open
+        bracket whose IRI matches the event's domain.
+        """
+        bracket_graph = self._find_open_bracket_for_domain(
+            open_brackets, ev.domain,
+        )
+        if bracket_graph is None:
+            return False
+        buf = open_brackets[bracket_graph]
+        buf.extend(triples)
+        if len(buf) >= self._bracket_chunk:
+            self._stage_chunk(bracket_graph, buf)
+            buf.clear()
+        return True
 
     # ── implementation ────────────────────────────────────
 
@@ -445,6 +472,40 @@ WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
         )
         r.raise_for_status()
 
+    def _purge_subject_update(self, ev: EventEnvelope) -> str:
+        """DELETE one subject, using its IRI exactly as given.
+
+        Every other write path percent-encodes the subject. That is what
+        makes this event necessary and what makes it dangerous, so the
+        IRI is passed through untouched here and guarded instead.
+
+        The guard: refuse any subject the normal path could address. If
+        quote(iri) == iri then a Delete* event can name that subject and
+        should be used, because it goes through the ordinary rules —
+        stale-twin cleanup, preserved predicates, the lot. Only a
+        subject quote() can never produce is legitimately unreachable,
+        and only those may be purged. Without this, a typo'd PurgeSubject
+        would be an unguarded whole-subject delete on live data.
+        """
+        from urllib.parse import quote  # pylint: disable=import-outside-toplevel
+        subject = ev.payload["subject_iri"]
+        graph = ev.payload["graph_iri"]
+        if quote(subject, safe=_IRI_SAFE) == subject:
+            raise ValueError(
+                f"PurgeSubject refused for <{subject}>: this subject is "
+                "addressable by the normal write path, so a Delete* event "
+                "should remove it. PurgeSubject is only for subjects "
+                "percent-encoding can never produce."
+            )
+        logger.info(
+            "purge-subject <%s> from <%s>: %s",
+            subject, graph, ev.payload.get("reason", "(no reason given)"),
+        )
+        g_iri = quote(graph, safe=_IRI_SAFE)
+        return (
+            f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{subject}> ?p ?o }} }}"
+        )
+
     def _build_update(self, ev: EventEnvelope, triples: list[Triple]) -> str:
         # No bracket → infer the target graph from the event's
         # domain. For now we use the same name->graph convention
@@ -463,7 +524,7 @@ WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
         # Virtuoso's SPARQL parser. Same reasoning as _iri() in
         # triples.py — Virtuoso doesn't fully implement RFC 3987.
         from urllib.parse import quote  # pylint: disable=import-outside-toplevel
-        _safe = "%:/?#[]@!$&\'()*+,;=._-~"
+        _safe = _IRI_SAFE
         # Notice-grain contracts (contract_key present): the event's
         # wipe-and-replace identity is the Notice subject, not ev.iri.
         # The renderer's monotone Contract-identity triples ride in the
