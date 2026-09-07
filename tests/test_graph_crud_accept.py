@@ -157,3 +157,39 @@ def test_bracket_streams_in_chunks_rather_than_buffering(crud_sink, monkeypatch)
     # The 1 remainder triple goes out with the close.
     assert len(_crud_posts(crud_sink)) == 3
     assert any("MOVE GRAPH" in q for q in _update_queries(crud_sink))
+
+
+def test_graph_replace_carries_over_owl_sameas(crud_sink):
+    """A whole-graph replace must not destroy predicates another
+    producer owns.
+
+    _PRESERVED_ON_REPLACE stops a whole-SUBJECT replace from deleting
+    the consolidator's owl:sameAs. A whole-GRAPH replace needs the same
+    protection and never had it: MOVE GRAPH replaces everything, so
+    every bulk reload silently wiped the identity edges.
+
+    Measured on shared after the 2026-09-06 full replay: of 38
+    AssertSameAs events routed to graph/sanctions, only the 6 asserted
+    after the last EndGraphReplace survived. The other 32 were written,
+    then destroyed by the sanctions bracket at seq 7,217,131.
+    """
+    crud_sink.handle([_ev("BeginGraphReplace"), _ev("EndGraphReplace")])
+    queries = _update_queries(crud_sink)
+    carry = next(
+        (q for q in queries if "INSERT" in q and "owl#sameAs" in q), None,
+    )
+    assert carry is not None, f"no owl:sameAs carry-over before the swap: {queries}"
+    assert f"GRAPH <{STAGING}>" in carry, "carry-over must target staging"
+    assert f"GRAPH <{GRAPH}>" in carry, "carry-over must read the live graph"
+
+
+def test_sameas_carry_over_happens_before_the_swap(crud_sink):
+    """Order matters: after the MOVE the live graph's copy is already
+    gone, so a carry-over that ran afterwards would find nothing."""
+    crud_sink.handle([_ev("BeginGraphReplace"), _ev("EndGraphReplace")])
+    queries = _update_queries(crud_sink)
+    carry_at = next(
+        i for i, q in enumerate(queries) if "INSERT" in q and "owl#sameAs" in q
+    )
+    move_at = next(i for i, q in enumerate(queries) if "MOVE GRAPH" in q)
+    assert carry_at < move_at, "carry-over ran after the swap destroyed the source"
