@@ -576,24 +576,25 @@ def _contract_value_quality_triples(iri: str, p: dict) -> list[Triple]:
     return out
 
 
-# Keys a collapse_modifications value-rollup UpsertContract carries. This sink
-# upserts by full per-subject wipe+replace (DELETE <iri> ?p ?o ; INSERT ...),
-# so rendering a rollup-only partial here would DELETE the subject's real
-# triples and re-insert only the rollup fields. RDF current_value therefore
-# needs a dedicated additive-predicate update path (tracked follow-up); until
-# then we skip rollup-only events so they never corrupt the RDF contract. The
-# Neo4j sink (additive SET n += props) already materialises the rollup, and
-# every contract-value aggregation in the API reads Neo4j, not this store.
+# Keys a collapse_modifications value-rollup UpsertContract carries.
 #
-# The guard also protects the notice-grain path: a rollup partial carries
-# contract_key, so without the early return it would route to the notice-grain
-# renderer, whose sink-side wipe targets the Notice subject — the wipe would
-# destroy the notice's real triples and re-insert nothing but identity.
-# Returning [] (rather than "just the monotone Contract-identity triples") is
-# deliberate: any non-empty render makes the sink run its DELETE-then-INSERT
-# update, and the DELETE half is what must not happen here. The identity
-# triples are guaranteed to exist already — the full notice event that
-# established contract_key inserted them.
+# A rollup is a PARTIAL: it restates current_value / is_current on a notice
+# that a full event already rendered. This sink otherwise upserts by full
+# per-subject wipe+replace (DELETE <iri> ?p ?o ; INSERT ...), so rendering a
+# partial under those semantics would delete the subject's real triples and
+# re-insert only the two rollup fields. It is safe now because the sink scopes
+# the replace to exactly the rollup predicates -- see rollup_scoped_predicates
+# and the payload-aware branch in sink._delete_clause.
+#
+# The subject is the OTHER half of getting this right. A rollup carries
+# contract_key, which used to route it through contract_notice_subject() to
+# .../Notice/<ted_notice_id> -- but no full event in the log carries
+# contract_key (all 844,029 are pre-native), so every notice's real triples
+# live at .../Contract/<ted_notice_id>. The rollup therefore landed on a
+# subject of its own: 27,142 orphan Notice subjects holding a lone
+# fontem:isCurrent, invisible to a read path that looks for isCurrent on the
+# contract subject. contract_notice_subject() now returns None for a rollup so
+# it falls back to ev.iri, which is that real subject.
 _ROLLUP_ONLY_KEYS = {"ted_notice_id", "current_value", "is_current", "contract_key"}
 
 
@@ -648,7 +649,22 @@ def contract_notice_subject(p: dict) -> str | None:
     UpsertContract: the Notice subject, keyed by ted_notice_id. Returns
     None for legacy notice-id-keyed contract events, which keep ev.iri.
     Single source of truth shared with the sink's replace-subject
-    override (mirrors company_subject_label)."""
+    override (mirrors company_subject_label).
+
+    A value rollup is NOT a notice-grain event, even though it carries
+    contract_key. It restates two fields on a notice that some earlier
+    event already rendered, and that event decided the subject. Routing
+    the rollup here keyed on contract_key alone sent it to
+    .../Notice/<id> while every full event in the log (all 844,029 of
+    them are pre-native and carry no contract_key) had rendered the
+    notice at .../Contract/<id>. The result was 27,142 orphan Notice
+    subjects holding a lone fontem:isCurrent, and a read path that
+    never saw isCurrent at all — so `_CANONICAL` fell through to
+    `notice_type != 'can-modif'` and hid every contract whose only
+    notice is a modification. Returning None hands the rollup back to
+    ev.iri, which is already the notice's real subject."""
+    if is_rollup_only(p):
+        return None
     if p.get("contract_key") and p.get("ted_notice_id"):
         return f"http://data.fontem.eu/id/Notice/{p['ted_notice_id']}"
     return None

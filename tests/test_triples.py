@@ -5,6 +5,7 @@ from virtuoso_sink.triples import (
     CURRENT_VALUE,
     IS_CURRENT,
     is_rollup_only,
+    contract_notice_subject,
     render_upsert_investment_fund,
     render_translate_authority_name, SKOS_ALT_LABEL,
     RENDERERS, render_upsert_authority,
@@ -744,20 +745,64 @@ def test_modification_notice_has_its_own_subject() -> None:
         [t.o for t in mod if t.p == f + "noticeOf"] == [f"<{contract}>"]
 
 
-def test_notice_grain_rollup_lands_on_the_notice_subject() -> None:
-    """Under the new grain the rollup belongs to the Notice, which is the
-    subject the sink scopes its DELETE against. Landing it anywhere else
-    would write triples outside the delete scope and accumulate stale
-    values forever."""
+def test_rollup_lands_on_the_subject_the_full_event_rendered() -> None:
+    """A rollup restates two fields on a notice some earlier event already
+    rendered, so it must land on THAT subject -- ev.iri, which for every
+    event in the log is .../Contract/<ted_notice_id>.
+
+    This test used to assert the opposite (.../Notice/<id>), on the theory
+    that a rollup is a notice-grain event because it carries contract_key.
+    It is not: no full UpsertContract in the log carries contract_key (all
+    844,029 are pre-native), so no Notice subject is ever created and the
+    rollup was landing alone on one. Shared held 27,142 orphan Notice
+    subjects with a lone fontem:isCurrent, and because the read path looks
+    for isCurrent on the contract subject it never saw one -- `_CANONICAL`
+    fell through to notice_type != 'can-modif' and hid all 21,102
+    contracts whose only notice is a modification (eu-LISA's EURODAC MWO
+    among them)."""
     out = render_upsert_contract({
         "ted_notice_id": "6a1e0e87-0000-5000-8000-000000000001",
         "contract_key": "proc:P-1",
         "current_value": 1500000.0,
         "is_current": True,
     })
-    notice = "http://data.fontem.eu/id/Notice/6a1e0e87-0000-5000-8000-000000000001"
-    assert {t.s for t in out} == {notice}
+    contract = ("http://data.fontem.eu/id/Contract/"
+                "6a1e0e87-0000-5000-8000-000000000001")
+    assert {t.s for t in out} == {contract}
     assert {t.p for t in out} == {CURRENT_VALUE, IS_CURRENT}
+
+
+def test_rollup_subject_matches_the_sinks_delete_scope() -> None:
+    """The renderer's subject and the sink's DELETE subject are chosen by
+    two different code paths; if they disagree the scoped DELETE clears
+    one subject while the INSERT writes another, and stale values
+    accumulate forever. contract_notice_subject() is that shared decision,
+    and returning None for a rollup is what makes the sink fall back to
+    ev.iri -- the same subject the renderer just used."""
+    rollup = {
+        "ted_notice_id": "6a1e0e87-0000-5000-8000-000000000001",
+        "contract_key": "proc:P-1",
+        "current_value": 1500000.0,
+        "is_current": True,
+    }
+    assert contract_notice_subject(rollup) is None
+    assert {t.s for t in render_upsert_contract(rollup)} == {
+        "http://data.fontem.eu/id/Contract/"
+        "6a1e0e87-0000-5000-8000-000000000001"
+    }
+
+
+def test_a_full_notice_grain_event_still_uses_the_notice_subject() -> None:
+    """The rollup carve-out must not disturb the native path: a FULL event
+    carrying contract_key is genuinely notice-grain and keeps its Notice
+    subject (none exist in the log today, but the renderer is frozen for
+    replay)."""
+    full = {
+        "ted_notice_id": "N-9", "contract_key": "proc:P-1",
+        "value_eur": 10.0, "notice_type": "can-standard",
+    }
+    assert contract_notice_subject(full) == \
+        "http://data.fontem.eu/id/Notice/N-9"
 
 
 def test_rollup_with_no_rollup_values_renders_nothing() -> None:
