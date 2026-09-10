@@ -46,12 +46,15 @@ def _sink(monkeypatch):
     return s
 
 
-def _ev(subject, graph=G, reason="stranded by 37af28e"):
+def _ev(subject, graph=G, reason="stranded by 37af28e",
+        only_predicates=None):
     ev = MagicMock()
     ev.event_type = "PurgeSubject"
     ev.payload = {
         "subject_iri": subject, "graph_iri": graph, "reason": reason,
     }
+    if only_predicates is not None:
+        ev.payload["only_predicates"] = only_predicates
     ev.domain = "listing"
     ev.iri = subject
     ev.op = "control"
@@ -68,20 +71,20 @@ def test_deletes_the_subject_verbatim(sink):
     assert f"GRAPH <{G}>" in update
 
 
-def test_refuses_an_addressable_subject(sink):
-    """The guard. An IRI quote() maps to itself can be deleted by a
-    normal Delete* event, which applies the ordinary rules. Allowing it
-    here would make a typo an unguarded whole-subject delete on live
-    data."""
-    with pytest.raises(ValueError, match="addressable"):
+def test_refuses_a_producible_iri_with_no_evidence(sink):
+    """The guard. An IRI quote() maps to itself may well belong to a
+    live subject that a normal Delete* should remove, and the IRI alone
+    cannot say otherwise. Without only_predicates a typo would be an
+    unguarded whole-subject delete on live data."""
+    with pytest.raises(ValueError, match="only_predicates"):
         sink._purge_subject_update(_ev(ENC))
 
 
-def test_refuses_a_plain_ascii_subject(sink):
+def test_refuses_a_plain_ascii_subject_with_no_evidence(sink):
     """Same guard, the ordinary case: nothing about a UUID-keyed
-    subject is unreachable."""
+    subject is unreachable on its own."""
     ascii_iri = "http://data.fontem.eu/id/Company/b3a154e1-0646-516c-abb4-e8eee6bc9497"
-    with pytest.raises(ValueError, match="addressable"):
+    with pytest.raises(ValueError, match="only_predicates"):
         sink._purge_subject_update(_ev(ascii_iri))
 
 
@@ -101,3 +104,78 @@ def test_a_refused_purge_raises_rather_than_silently_skipping(sink):
     believing the cleanup ran."""
     with pytest.raises(ValueError):
         sink.handle([_ev(ENC)])
+
+
+# The second way a subject becomes unreachable: its IRI is perfectly
+# producible, but no renderer writes that family any more. Shared has
+# 27,142 such Notice subjects, left by a contract value rollup routed
+# there before #130. The encoding test cannot see the difference
+# between one of those and a live subject, so the event carries
+# only_predicates and the sink checks it against the store.
+
+ORPHAN = "http://data.fontem.eu/id/Notice/639139-2020"
+IS_CURRENT = "http://data.fontem.eu/ontology#isCurrent"
+CURRENT_VALUE = "http://data.fontem.eu/ontology#currentValue"
+ROLLUP_PREDS = [IS_CURRENT, CURRENT_VALUE]
+
+
+def _predicates_reply(sink, predicates):
+    """Point the fake client at a DISTINCT ?p result."""
+    sink._client.post.return_value = MagicMock(
+        raise_for_status=MagicMock(return_value=None),
+        json=MagicMock(return_value={"results": {"bindings": [
+            {"p": {"value": p}} for p in predicates
+        ]}}),
+    )
+
+
+def test_purges_a_producible_iri_when_the_store_agrees(sink):
+    """The subject carries nothing outside what the event declared, so
+    it is a leftover and the purge proceeds."""
+    _predicates_reply(sink, [IS_CURRENT])
+    update = sink._purge_subject_update(
+        _ev(ORPHAN, only_predicates=ROLLUP_PREDS))
+    assert update.startswith("DELETE WHERE")
+    assert f"<{ORPHAN}>" in update
+
+
+def test_refuses_when_the_subject_carries_more_than_declared(sink):
+    """The check that makes this safe. If the subject holds a predicate
+    the event did not account for, it is not the leftover the event
+    describes — purging would delete real triples."""
+    _predicates_reply(sink, [
+        IS_CURRENT, "http://data.fontem.eu/ontology#tedNoticeId",
+    ])
+    with pytest.raises(ValueError, match="tedNoticeId"):
+        sink._purge_subject_update(_ev(ORPHAN, only_predicates=ROLLUP_PREDS))
+
+
+def test_a_subject_with_no_triples_passes(sink):
+    """Replay idempotency: a purge redelivered after it already applied
+    finds nothing, which is trivially within any declared set. It must
+    be a no-op, not a failure that dead-letters on every replay."""
+    _predicates_reply(sink, [])
+    update = sink._purge_subject_update(
+        _ev(ORPHAN, only_predicates=ROLLUP_PREDS))
+    assert update.startswith("DELETE WHERE")
+
+
+def test_an_unproducible_iri_needs_no_evidence(sink):
+    """Case (1) is unchanged: the IRI itself is proof, so no store
+    round-trip happens and no only_predicates is required."""
+    sink._client.post.reset_mock()
+    update = sink._purge_subject_update(_ev(RAW))
+    assert f"<{RAW}>" in update
+    assert not sink._client.post.called, (
+        "checked the store for a subject whose IRI is already proof")
+
+
+def test_the_evidence_query_names_the_subject_verbatim(sink):
+    """The check must ask about the same bytes the delete will use, or
+    it would verify one subject and delete another."""
+    _predicates_reply(sink, [IS_CURRENT])
+    sink._purge_subject_update(_ev(ORPHAN, only_predicates=ROLLUP_PREDS))
+    asked = sink._client.post.call_args.kwargs["data"]["query"]
+    assert f"<{ORPHAN}>" in asked
+    assert "SELECT DISTINCT ?p" in asked
+    assert f"GRAPH <{G}>" in asked

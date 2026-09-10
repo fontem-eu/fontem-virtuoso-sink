@@ -472,6 +472,42 @@ WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
         )
         r.raise_for_status()
 
+    def _assert_carries_only(
+        self, graph: str, subject: str, allowed: list[str],
+    ) -> None:
+        """Refuse unless the subject carries nothing outside `allowed`.
+
+        This is the evidence check behind a purge of an ordinary-looking
+        IRI. Asked as a DISTINCT predicate list rather than an ASK for
+        each predicate: one round-trip, and the error can name what was
+        actually found, which is what makes a refusal diagnosable.
+
+        A subject with no triples passes — it carries nothing, which is
+        trivially within any set. That keeps replay idempotent: a purge
+        redelivered after it already applied is a no-op, not a failure.
+        """
+        from urllib.parse import quote  # pylint: disable=import-outside-toplevel
+        g_iri = quote(graph, safe=_IRI_SAFE)
+        r = self._client.post(
+            self._update_url,
+            data={"query": _BIG_DATA_CONST_OVERRIDE + (
+                f"SELECT DISTINCT ?p WHERE {{ GRAPH <{g_iri}> "
+                f"{{ <{subject}> ?p ?o }} }}"
+            )},
+        )
+        r.raise_for_status()
+        found = {
+            b["p"]["value"]
+            for b in r.json()["results"]["bindings"] if "p" in b
+        }
+        if extra := sorted(found - set(allowed)):
+            raise ValueError(
+                f"PurgeSubject refused for <{subject}>: the event declares "
+                f"only_predicates {sorted(allowed)} but the subject also "
+                f"carries {extra}. Purging would delete triples the event "
+                "did not account for."
+            )
+
     def _purge_subject_update(self, ev: EventEnvelope) -> str:
         """DELETE one subject, using its IRI exactly as given.
 
@@ -479,24 +515,40 @@ WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
         makes this event necessary and what makes it dangerous, so the
         IRI is passed through untouched here and guarded instead.
 
-        The guard: refuse any subject the normal path could address. If
-        quote(iri) == iri then a Delete* event can name that subject and
-        should be used, because it goes through the ordinary rules —
-        stale-twin cleanup, preserved predicates, the lot. Only a
-        subject quote() can never produce is legitimately unreachable,
-        and only those may be purged. Without this, a typo'd PurgeSubject
-        would be an unguarded whole-subject delete on live data.
+        The guard, in two halves, because a subject becomes unreachable
+        two ways.
+
+        If quote(iri) != iri the IRI itself is unproducible: nothing the
+        sink writes can land there and no Delete* can name it, so the
+        purge is allowed on the IRI alone.
+
+        If quote(iri) == iri the IRI is one the normal path could still
+        produce, and by itself that says nothing about whether the
+        subject is live — a Delete* may be the right tool, or the
+        subject may be a leftover from a renderer that no longer writes
+        that family (27,142 orphan Notice subjects on shared came from a
+        contract value rollup routed there before #130). The IRI cannot
+        tell those apart, so the event must carry the evidence:
+        only_predicates, everything the subject may hold. We check it
+        against the store and refuse if the subject carries anything
+        else. A live subject carries far more than a leftover, so this
+        is a stronger guard than the encoding test for this case — and
+        an event without it is still refused outright.
         """
         from urllib.parse import quote  # pylint: disable=import-outside-toplevel
         subject = ev.payload["subject_iri"]
         graph = ev.payload["graph_iri"]
         if quote(subject, safe=_IRI_SAFE) == subject:
-            raise ValueError(
-                f"PurgeSubject refused for <{subject}>: this subject is "
-                "addressable by the normal write path, so a Delete* event "
-                "should remove it. PurgeSubject is only for subjects "
-                "percent-encoding can never produce."
-            )
+            allowed = ev.payload.get("only_predicates")
+            if not allowed:
+                raise ValueError(
+                    f"PurgeSubject refused for <{subject}>: this subject's "
+                    "IRI is one the normal write path can produce, so a "
+                    "Delete* event should remove it. If nothing routes to "
+                    "this subject any more, declare only_predicates on the "
+                    "event so the sink can verify it is a leftover."
+                )
+            self._assert_carries_only(graph, subject, allowed)
         logger.info(
             "purge-subject <%s> from <%s>: %s",
             subject, graph, ev.payload.get("reason", "(no reason given)"),
