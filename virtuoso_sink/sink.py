@@ -483,8 +483,11 @@ WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
         actually found, which is what makes a refusal diagnosable.
 
         A subject with no triples passes — it carries nothing, which is
-        trivially within any set. That keeps replay idempotent: a purge
-        redelivered after it already applied is a no-op, not a failure.
+        trivially within any set, including the empty one. That keeps
+        replay idempotent: a purge redelivered after it already applied
+        is a no-op, not a failure. An empty `allowed` is therefore the
+        no-evidence case rather than a degenerate one — it permits
+        exactly the purges that would delete nothing.
         """
         from urllib.parse import quote  # pylint: disable=import-outside-toplevel
         g_iri = quote(graph, safe=_IRI_SAFE)
@@ -501,6 +504,15 @@ WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
             for b in r.json()["results"]["bindings"] if "p" in b
         }
         if extra := sorted(found - set(allowed)):
+            if not allowed:
+                raise ValueError(
+                    f"PurgeSubject refused for <{subject}>: this subject's "
+                    "IRI is one the normal write path can produce and it "
+                    f"carries {extra}, so a Delete* event should remove it. "
+                    "If nothing routes to this subject any more, declare "
+                    "only_predicates on the event so the sink can verify "
+                    "it is a leftover."
+                )
             raise ValueError(
                 f"PurgeSubject refused for <{subject}>: the event declares "
                 f"only_predicates {sorted(allowed)} but the subject also "
@@ -539,16 +551,22 @@ WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} FILTER(?p IN ({values})) }}
         subject = ev.payload["subject_iri"]
         graph = ev.payload["graph_iri"]
         if quote(subject, safe=_IRI_SAFE) == subject:
-            allowed = ev.payload.get("only_predicates")
-            if not allowed:
-                raise ValueError(
-                    f"PurgeSubject refused for <{subject}>: this subject's "
-                    "IRI is one the normal write path can produce, so a "
-                    "Delete* event should remove it. If nothing routes to "
-                    "this subject any more, declare only_predicates on the "
-                    "event so the sink can verify it is a leftover."
-                )
-            self._assert_carries_only(graph, subject, allowed)
+            # No declared predicates means no evidence, so the only
+            # thing that can make this safe is the store holding
+            # nothing to lose. Passing an empty allow-set says exactly
+            # that: any predicate found is one the event did not
+            # account for, so a subject with triples is refused and an
+            # empty subject is a no-op.
+            #
+            # That is what keeps the log replayable from seq 0. Shared
+            # carries 27,142 PurgeSubject events emitted before
+            # only_predicates existed; on a fresh replay the rollup
+            # never creates their subjects (#130), so by the time those
+            # events come round there is nothing there and they pass as
+            # the no-ops they should always have been.
+            self._assert_carries_only(
+                graph, subject, ev.payload.get("only_predicates") or [],
+            )
         logger.info(
             "purge-subject <%s> from <%s>: %s",
             subject, graph, ev.payload.get("reason", "(no reason given)"),

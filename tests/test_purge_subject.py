@@ -76,6 +76,7 @@ def test_refuses_a_producible_iri_with_no_evidence(sink):
     live subject that a normal Delete* should remove, and the IRI alone
     cannot say otherwise. Without only_predicates a typo would be an
     unguarded whole-subject delete on live data."""
+    _predicates_reply(sink, ["http://data.fontem.eu/ontology#ticker"])
     with pytest.raises(ValueError, match="only_predicates"):
         sink._purge_subject_update(_ev(ENC))
 
@@ -84,6 +85,7 @@ def test_refuses_a_plain_ascii_subject_with_no_evidence(sink):
     """Same guard, the ordinary case: nothing about a UUID-keyed
     subject is unreachable on its own."""
     ascii_iri = "http://data.fontem.eu/id/Company/b3a154e1-0646-516c-abb4-e8eee6bc9497"
+    _predicates_reply(sink, ["http://data.fontem.eu/ontology#name"])
     with pytest.raises(ValueError, match="only_predicates"):
         sink._purge_subject_update(_ev(ascii_iri))
 
@@ -102,6 +104,7 @@ def test_a_refused_purge_raises_rather_than_silently_skipping(sink):
     """It must reach the consumer as a failure. A purge that quietly
     did nothing would read as success in the log and leave the operator
     believing the cleanup ran."""
+    _predicates_reply(sink, ["http://data.fontem.eu/ontology#ticker"])
     with pytest.raises(ValueError):
         sink.handle([_ev(ENC)])
 
@@ -179,3 +182,24 @@ def test_the_evidence_query_names_the_subject_verbatim(sink):
     assert f"<{ORPHAN}>" in asked
     assert "SELECT DISTINCT ?p" in asked
     assert f"GRAPH <{G}>" in asked
+
+
+def test_no_evidence_and_an_empty_subject_is_a_no_op(sink):
+    """Replay stability from seq 0. Shared carries 27,142 PurgeSubject
+    events emitted before only_predicates existed. On a fresh replay the
+    rollup never creates their subjects (#130), so by the time those
+    events come round there is nothing there — and a purge that would
+    delete nothing must pass, not dead-letter on every replay forever."""
+    _predicates_reply(sink, [])
+    update = sink._purge_subject_update(_ev(ORPHAN))
+    assert update.startswith("DELETE WHERE")
+    assert f"<{ORPHAN}>" in update
+
+
+def test_no_evidence_names_what_it_found_when_it_refuses(sink):
+    """A refusal has to be diagnosable: the operator needs to see what
+    the subject actually holds to decide between a Delete* and a purge
+    with declared predicates."""
+    _predicates_reply(sink, ["http://data.fontem.eu/ontology#tedNoticeId"])
+    with pytest.raises(ValueError, match="tedNoticeId"):
+        sink._purge_subject_update(_ev(ORPHAN))
