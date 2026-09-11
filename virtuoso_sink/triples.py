@@ -114,6 +114,50 @@ def _decimal(value) -> str | None:
 
 # ── renderers ────────────────────────────────────────────────────
 
+# UpsertCompany keys rendered as a plain fontem: literal -> local name.
+_COMPANY_LITERAL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("lei", "lei"), ("vat", "vat"), ("cik", "cik"),
+    ("legal_form", "legalForm"), ("postal_code", "postalCode"),
+    ("entity_kind", "entityKind"), ("registered_as", "registeredAs"),
+    ("registered_at", "registeredAt"), ("jurisdiction", "jurisdiction"),
+    ("registration_status", "registrationStatus"),
+    ("entity_creation_date", "entityCreationDate"),
+    ("address", "address"), ("city", "city"), ("region", "region"),
+    ("hq_address", "hqAddress"), ("hq_city", "hqCity"),
+    ("hq_region", "hqRegion"), ("hq_postal_code", "hqPostalCode"),
+)
+
+#: Every UpsertCompany key that renders a triple -> its predicate. The
+#: renderer writes from it and the partial replace deletes from it.
+COMPANY_FIELD_PREDICATES: dict[str, str] = {
+    "name": RDFS_LABEL,
+    **{key: f"{FONTEM}{local}" for key, local in _COMPANY_LITERAL_FIELDS},
+    "country": WDT_P17,
+    "hq_country": f"{FONTEM}hqCountry",
+    "active": f"{FONTEM}active",
+    "aliases": f"{FONTEM}alias",
+}
+
+
+def company_partial_predicates(event_type: str, payload: dict) -> tuple[str, ...] | None:
+    """The predicates a partial UpsertCompany replaces, or None when the
+    event describes the whole entity.
+
+    Only load_gleif describes a whole company, and it always states
+    entity_kind; the relabel cleanup depends on it refreshing the subject
+    wholesale. Every other producer sends a slice -- {gmr_id, lei} from
+    load_gleif_relationships, a notice's name and country from
+    load_ted_contracts -- and a whole-subject replace with a slice deleted
+    the GLEIF record it knew nothing about, while Neo4j merged the same
+    event and kept it. A key is stated when its value is not null: the
+    rule the Neo4j sink applies to its SET map.
+    """
+    if event_type != "UpsertCompany" or payload.get("entity_kind"):
+        return None
+    return tuple(pred for key, pred in COMPANY_FIELD_PREDICATES.items()
+                 if payload.get(key) is not None)
+
+
 def company_subject_label(p: dict) -> str:
     """Subject label from GLEIF entity_kind: FUND -> InvestmentFund,
     anything else (or absent) -> Company. Single source of truth shared
@@ -132,19 +176,7 @@ def render_upsert_company(p: dict) -> list[Triple]:  # pylint: disable=too-many-
     ]
     if name := _lit(p.get("name"), lang="en"):
         out.append(Triple(iri, RDFS_LABEL, name, is_literal=True))
-    for key, pred in (("lei", "lei"), ("vat", "vat"), ("cik", "cik"),
-                      ("legal_form", "legalForm"),
-                      ("postal_code", "postalCode"),
-                      ("entity_kind", "entityKind"),
-                      ("registered_as", "registeredAs"),
-                      ("registered_at", "registeredAt"),
-                      ("jurisdiction", "jurisdiction"),
-                      ("registration_status", "registrationStatus"),
-                      ("entity_creation_date", "entityCreationDate"),
-                      ("address", "address"), ("city", "city"),
-                      ("region", "region"), ("hq_address", "hqAddress"),
-                      ("hq_city", "hqCity"), ("hq_region", "hqRegion"),
-                      ("hq_postal_code", "hqPostalCode")):
+    for key, pred in _COMPANY_LITERAL_FIELDS:
         if v := _lit(p.get(key)):
             out.append(Triple(iri, f"{FONTEM}{pred}", v, is_literal=True))
     if country := _lit(p.get("country")):
