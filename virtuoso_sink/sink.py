@@ -26,8 +26,8 @@ from fontem_events import EventConsumer
 
 from .triples import (
     ADDITIVE_EVENTS, OWL_SAME_AS, RENDERERS, RETRACTION_EVENTS,
-    SCOPED_REPLACE_PREDICATES, Triple, rollup_scoped_predicates,
-    contract_notice_subject, to_turtle,
+    SCOPED_REPLACE_PREDICATES, Triple, company_partial_predicates,
+    contract_notice_subject, rollup_scoped_predicates, to_turtle,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,8 @@ def _delete_clause(
 ) -> str:
     """The DELETE half of an upsert UPDATE. A scoped-replace event clears
     only its enrichment predicate(s) for the subject so the subject's
-    other triples survive; every other event wipes the whole subject.
+    other triples survive, a partial UpsertCompany clears only the fields
+    it states, and every other event wipes the whole subject.
 
     `payload` is consulted for scopes that depend on the event's CONTENT
     rather than its type — a contract value-collapse rollup arrives as an
@@ -99,6 +100,16 @@ def _delete_clause(
             return "".join(
                 f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> <{pred}> ?o }} }} ; "
                 for pred in scoped
+            )
+        # Checked with `is not None`, not truthiness: a partial company
+        # event stating no field must delete nothing. Falling through to
+        # the whole-subject branch would leave the company as a bare
+        # rdf:type, which is the state 2.36M prod subjects were found in.
+        partial = company_partial_predicates(event_type, payload)
+        if partial is not None:
+            return "".join(
+                f"DELETE WHERE {{ GRAPH <{g_iri}> {{ <{s_iri}> <{pred}> ?o }} }} ; "
+                for pred in partial
             )
     if event_type in ADDITIVE_EVENTS:
         # Nothing is cleared: the event states one discrete fact that
@@ -113,7 +124,8 @@ def _delete_clause(
         )
     # Whole-subject replace, minus the predicates another producer owns.
     #
-    # An Upsert carries the entity's full description, so replacing the
+    # An Upsert that reaches here carries the entity's full description
+    # (a partial UpsertCompany was scoped above), so replacing the
     # subject wholesale is right for everything the ETL asserts. It is
     # wrong for owl:sameAs, which the consolidator asserts about the same
     # subject from a different event stream: a plain wipe deletes an
