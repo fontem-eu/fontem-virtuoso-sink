@@ -56,17 +56,11 @@ jobs:
           # every file (the gate then fails on unrelated code).
           fetch-depth: 0
       - name: Install dependencies and generate coverage
-        env:
-          GMR_CI_READ_TOKEN: ${{ secrets.CI_READ_TOKEN }}
         run: |
-          # Mirror the `test` job's install: internal deps + .[test] + pylint.
-          tmpdir=$(mktemp -d)
-          for repo in fontem-event-schemas fontem-events; do
-              git clone --depth 1 \
-                  "http://lucid:${GMR_CI_READ_TOKEN}@contribute.void42.internal/fontem/${repo}.git" \
-                  "$tmpdir/$repo"
-              pip install --no-cache-dir "$tmpdir/$repo"
-          done
+          # Mirror the `test` job's install: the vendored wheels the
+          # image ships, not the tip of each dep's default branch —
+          # which stopped matching the pins at fontem-events 0.6.0.
+          pip install --no-cache-dir vendor/*.whl
           pip install --no-cache-dir -e '.[test]'
           pip install --no-cache-dir pylint
           pip install --no-cache-dir pytest-cov
