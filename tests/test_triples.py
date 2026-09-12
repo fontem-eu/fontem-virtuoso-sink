@@ -391,6 +391,29 @@ def test_contract_emits_procedure_and_modification_triples() -> None:
     assert pmap[f + "procedureId"] == '"proc-7bcd"'
     assert pmap[f + "noticeType"] == '"can-modif"'
     assert pmap[f + "modifiesPublicationNumber"] == '"708565-2022"'
+    assert f + "modifies" not in pmap  # publication-number form: literal only
+
+
+def test_contract_emits_identity_stamps_and_modifies_edge() -> None:
+    """The notice-id form of the back-link is an edge to the previous
+    Notice subject; version and legacy reference are literals."""
+    triples = render_upsert_contract({
+        "ted_notice_id": "45e2298d-a5f4-4ee2-8bfe-6db03105d40b",
+        "contract_key": "proc-5339",
+        "notice_kind": "modification",
+        "notice_version": "01",
+        "modifies_notice_id": "a64a67f4-a562-4014-ae25-232da2f4fa1c",
+        "legacy_procedure_id": "EKR001152382021",
+    })
+    pmap = {t.p: t for t in triples}
+    f = "http://data.fontem.eu/ontology#"
+    assert pmap[f + "noticeVersion"].o == '"01"'
+    assert pmap[f + "legacyProcedureId"].o == '"EKR001152382021"'
+    assert pmap[f + "modifiesNoticeId"].o == '"a64a67f4-a562-4014-ae25-232da2f4fa1c"'
+    edge = pmap[f + "modifies"]
+    assert not edge.is_literal
+    assert edge.o == "<http://data.fontem.eu/id/Notice/a64a67f4-a562-4014-ae25-232da2f4fa1c>"
+    assert edge.s == "http://data.fontem.eu/id/Notice/45e2298d-a5f4-4ee2-8bfe-6db03105d40b"
 
 
 # ── InvestmentFund entity + fund-unit listings ────────────────────

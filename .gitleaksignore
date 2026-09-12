@@ -1,0 +1,3 @@
+# gitleaks fingerprints that are not secrets (see the commit that added each).
+# A UUID-shaped contract key in a renderer test, matched by generic-api-key.
+80d032e8c054de9f41e697249a75c3afc43045cd:tests/test_triples.py:generic-api-key:402

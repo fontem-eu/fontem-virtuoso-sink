@@ -1,3 +1,6 @@
+# pylint: disable=too-many-lines
+# One renderer per event type lives here on purpose: the Triple/_iri/_lit
+# primitives are module-private and a split would either cycle or export them.
 """Event payload → Turtle triples renderers.
 
 Each entity event type maps to a small render function that
@@ -851,6 +854,33 @@ _INTEGRITY_FLAGS = (
 )
 
 
+def _notice_identity_triples(iri: str, p: dict) -> list[Triple]:
+    """Identity stamps a notice carries from its own XML (2026-09, single
+    ingest path): the notice version, the pre-eForms file reference and
+    the modification back-link in its notice-id form.
+
+    The notice-id form also becomes a ``fontem:modifies`` edge: Notice
+    subjects are keyed by ``ted_notice_id``, so the previous notice's IRI
+    is derivable without a lookup. The publication-number form stays a
+    literal (``fontem:modifiesPublicationNumber``, rendered with the
+    integrity fields) — an eForms notice's IRI is its UUID, not its
+    publication number, so SPARQL joins that form on
+    ``fontem:tedPublicationNumber``."""
+    out: list[Triple] = []
+    if ver := _lit(p.get("notice_version")):
+        out.append(Triple(iri, f"{FONTEM}noticeVersion", ver, is_literal=True))
+    if lpid := _lit(p.get("legacy_procedure_id")):
+        out.append(Triple(iri, f"{FONTEM}legacyProcedureId", lpid,
+                          is_literal=True))
+    if mni := _lit(p.get("modifies_notice_id")):
+        out.append(Triple(iri, f"{FONTEM}modifiesNoticeId", mni, is_literal=True))
+        out.append(Triple(
+            iri, f"{FONTEM}modifies",
+            _iri(f"http://data.fontem.eu/id/Notice/{p['modifies_notice_id']}"),
+        ))
+    return out
+
+
 def _contract_integrity_triples(iri: str, p: dict) -> list[Triple]:  # pylint: disable=too-many-locals
     """Tender-integrity fields + the shared keystone's red flags, so SPARQL
     carries the same single-bidder / CRI signals as Neo4j. Split out of
@@ -877,6 +907,7 @@ def _contract_integrity_triples(iri: str, p: dict) -> list[Triple]:  # pylint: d
     if mpn := _lit(p.get("modifies_publication_number")):
         out.append(Triple(iri, f"{FONTEM}modifiesPublicationNumber", mpn,
                           is_literal=True))
+    out.extend(_notice_identity_triples(iri, p))
     flags = dict(contract_red_flags(p))
     for fld, pred in _INTEGRITY_FLAGS:
         b = p.get(fld) if fld in ("is_framework", "eu_funded") else flags.get(fld)
