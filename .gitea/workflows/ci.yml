@@ -100,7 +100,7 @@ jobs:
 
       - name: Login to contribute.void42.internal (base-image pull)
         # The Dockerfile's first stage pulls
-        # `contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.14`
+        # `contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16@sha256:e7a5cd19…`
         # for the isql binary + OpenLink shared libs. docker-build-sign
         # only logs into the in-cluster Gitea URL, so the
         # contribute.void42.internal pull errors with
