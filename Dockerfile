@@ -2,9 +2,12 @@
 # rdf_loader_run for files larger than SPARQL `LOAD <url>`'s ~10 MB
 # string-content limit (FA008 error). Pulled in via a multi-stage
 # copy from the Virtuoso image — same pattern as virtuoso-exporter.
-FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.14 AS virtuoso
+# Base images are pinned by digest: a tag can be re-pushed upstream and
+# change the build with no commit of ours (Docker Hub swapped Virtuoso
+# 7.2.17 for a 7.2.18-dev build in August 2026).
+FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d AS virtuoso
 
-FROM python:3.14-slim
+FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2
 
 COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
 RUN apt-get update -y \
