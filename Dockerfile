@@ -10,8 +10,11 @@ FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16@sha256:e7a5c
 FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
 
 COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
+# libedit2 is isql's line-editing library. Without it isql does not load
+# ("libedit.so.2: cannot open shared object file"), so bulk_load could
+# never drive ld_dir/rdf_loader_run.
 RUN apt-get update -y \
- && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 \
+ && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 libedit2 \
  && update-ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
