@@ -7,7 +7,7 @@
 # 7.2.17 for a 7.2.18-dev build in August 2026).
 FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d AS virtuoso
 
-FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
+FROM python:3.14-slim@sha256:0741d101873c12ab927e6f8653feb8862b9bd58771177acb1b885b95141f91b4
 
 COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
 # libedit2 is isql's line-editing library. Without it isql does not load
