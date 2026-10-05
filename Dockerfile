@@ -5,7 +5,9 @@
 # Base images are pinned by digest: a tag can be re-pushed upstream and
 # change the build with no commit of ours (Docker Hub swapped Virtuoso
 # 7.2.17 for a 7.2.18-dev build in August 2026).
-FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16@sha256:e7a5cd1915569d70d8363503dc62f6bf818b485f1501b230c7608cde8528c72d AS virtuoso
+# Our patched Virtuoso image (same OpenLink build), which declares Virtuoso
+# for SBOMs: sbom-declare.py reads that declaration.
+FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16-r3@sha256:6e93fc5364b16105cfba9d36c37c0bb8538011bdc376dcf6317e1b2b2781c308 AS virtuoso
 
 FROM python:3.14-slim@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151
 
@@ -22,6 +24,14 @@ RUN apt-get update -y \
 COPY --from=virtuoso /opt/virtuoso-opensource/bin/isql /opt/virtuoso-opensource/bin/isql
 COPY --from=virtuoso /opt/virtuoso-opensource/lib/ /opt/virtuoso-opensource/lib/
 ENV LD_LIBRARY_PATH=/opt/virtuoso-opensource/lib
+# isql, the ODBC libraries and CPython's own extension modules are not in any
+# package database: declare them for the SBOM (sbom-declare.py), which
+# docker-build-sign requires to cover every executable file.
+COPY --from=virtuoso /usr/share/void42/sbom/declared.json /tmp/virtuoso-declared.json
+COPY sbom-declare.py /tmp/sbom-declare.py
+RUN mkdir -p /usr/share/void42/sbom \
+ && python3 /tmp/sbom-declare.py /tmp/virtuoso-declared.json > /usr/share/void42/sbom/declared.json \
+ && rm /tmp/virtuoso-declared.json /tmp/sbom-declare.py
 
 ENV PIP_INDEX_URL=https://nexus.void42.internal/repository/pypi-proxy/simple/ \
     PIP_TRUSTED_HOST=nexus.void42.internal
