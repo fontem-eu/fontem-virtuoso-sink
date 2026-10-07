@@ -9,7 +9,7 @@
 # for SBOMs: sbom-declare.py reads that declaration.
 FROM contribute.void42.internal/fontem/virtuoso-opensource-7:7.2.16-r3@sha256:6e93fc5364b16105cfba9d36c37c0bb8538011bdc376dcf6317e1b2b2781c308 AS virtuoso
 
-FROM python:3.14-slim@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151
+FROM python:3.14-slim@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2
 
 COPY void42-ca.crt /usr/local/share/ca-certificates/void42-ca.crt
 # libedit2 is isql's line-editing library. Without it isql does not load
